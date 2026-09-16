@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Model weights (auto-downloaded on first run)
+*.pt
+
+# User data / generated output
+storage/uploads/*
+storage/outputs/*
+storage/jobs.json
+storage/.bin/
+!storage/uploads/.gitkeep
+!storage/outputs/.gitkeep

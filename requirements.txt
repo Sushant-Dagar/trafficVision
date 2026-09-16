@@ -1,0 +1,16 @@
+# Web server
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+
+# AI / detection + tracking
+ultralytics==8.3.60
+
+# Video I/O
+opencv-python==4.11.0.86
+imageio==2.36.1
+imageio-ffmpeg==0.5.1
+numpy==2.1.3
+
+# Remote video download (YouTube / Dropbox / direct URL)
+yt-dlp>=2026.8.19
