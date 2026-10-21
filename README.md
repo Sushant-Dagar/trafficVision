@@ -2,9 +2,9 @@
 
 Upload videos of traffic-signal intersections (3-, 4-, or 5-way). A pretrained
 **YOLOv8** model detects every passing vehicle, **ByteTrack** tracks each one so it's
-counted exactly once, and you get an **annotated video** plus a full stats breakdown:
-total vehicles, a 2-wheeler / 4-wheeler split, per-type counts, and a per-vehicle table
-with type and number of wheels.
+counted exactly once, and every vehicle is assigned to the **road it came from**. For
+each road you get its own cropped video, counts by vehicle type, and a timeline of
+when each vehicle arrived — plus an annotated overview of the whole junction.
 
 No GPU and no dataset/training required — it uses standard COCO vehicle classes
 (car, truck, bus, motorcycle, bicycle) out of the box.
@@ -31,14 +31,42 @@ Then open **http://127.0.0.1:8000** in your browser.
 
 ## How to use
 
-1. **Upload** one or more intersection videos (drag-and-drop or browse).
-2. Each video appears as a card that moves through **Queued → Processing → Done**.
-   Videos process one at a time (CPU-friendly); the card shows a live progress bar.
-3. **Click a "Done" card** to open its detail page:
-   - the annotated video (bounding boxes + `type #id` labels),
-   - summary tiles (total / 2-wheelers / 4-wheelers),
-   - a breakdown-by-type table,
-   - a per-vehicle table: **ID · type · category · wheels · average confidence**.
+1. **Upload** an intersection video (drag-and-drop, browse, or paste a URL). The app
+   asks **how many roads meet at the junction**.
+2. **Step 1 — detection.** The card shows *Detecting* while every vehicle is found and
+   tracked. Videos process one at a time (CPU-friendly).
+3. **Mark roads.** When detection finishes the card changes to *Mark roads*. Open it
+   to see a still frame with one suggested outline per road, worked out from where
+   vehicles actually drove (shown as faint lines). Adjust them:
+   - drag a corner to move it, drag the small dots between corners to add one,
+     double-click a corner to delete it, drag inside an outline to move it all,
+   - **Redraw** a road by clicking around it, rename roads, or add/remove roads.
+   Each outline should cover the stretch of road *leading into* the junction.
+4. **Step 2 — counting.** Click *Confirm roads & count*. This reuses the saved
+   tracking, so it's much faster than step 1.
+5. **Open the finished video** to see, for each road:
+   - a video cropped to that road (its vehicles boxed in the road's colour, a live counter),
+   - counts by vehicle type,
+   - a *vehicles over time* graph whose marker follows the video,
+   - a list of every vehicle with its arrival time — click one to jump the video there.
+
+   Below that: the full junction view, and a table of every vehicle with the road it
+   came from and when it arrived.
+
+Use **Edit roads** on a finished video to change the outlines and recount in seconds,
+without re-running detection.
+
+### How a vehicle is assigned to a road
+
+A vehicle counts for the road whose outline its ground point (bottom-centre of its box)
+is inside when it first appears. It must be on a road within ~1 second of first being
+seen. This leaves out:
+- parked vehicles off the road,
+- vehicles that never enter any outline,
+- tracker fragments picked up in the middle of the junction (the tracker briefly lost
+  a vehicle and re-found it with a new id) — otherwise these would be counted twice.
+
+These show up as "not counted for a road" and are boxed in grey in the overview.
 
 ---
 
@@ -82,8 +110,9 @@ MODEL_NAME=yolov8n.pt IMG_SIZE=480 python -m uvicorn backend.main:app --port 800
 
 ```
 backend/
-  main.py        FastAPI app: upload, list, detail, video streaming + worker thread
-  processor.py   YOLO track loop, annotate, H.264 encode, stats aggregation
+  main.py        FastAPI app: upload, list, detail, roads, video streaming + worker thread
+  processor.py   pass 1: YOLO + ByteTrack, save tracks · pass 2: per-road videos + stats
+  roads.py       suggest road outlines from vehicle paths, assign vehicles to roads
   config.py      paths, model settings, vehicle-class mapping
   jobs.py        file-backed job store (storage/jobs.json)
 frontend/
@@ -92,15 +121,19 @@ frontend/
   styles.css     styling
 storage/
   uploads/       original uploaded videos
-  outputs/       annotated {job_id}.mp4 + {job_id}.json stats
+  outputs/       {job_id}.mp4 overview, {job_id}_road{n}.mp4 per road,
+                 {job_id}.json stats, {job_id}_tracks.npy saved tracking,
+                 {job_id}_frame.jpg + {job_id}_analysis.json for the road editor
 ```
 
 ---
 
 ## Notes
 
-- **Counting scope:** totals are for the whole video (each vehicle counted once), not
-  per intersection arm/direction.
+- **Counting scope:** each vehicle is counted once, on the road it came from. Vehicles
+  already waiting on a road when the clip starts count for that road at 0:00.
+- **Camera:** works best with a fixed camera (CCTV or a steady elevated view). A moving
+  or panning camera makes the road outlines meaningless.
 - **Accuracy:** the pretrained detector is strong on cars/buses/trucks/motorcycles;
   bicycles and heavily occluded vehicles in busy scenes are inherently harder.
 - **Browser-playable video:** output is encoded as H.264 via `imageio-ffmpeg` (a

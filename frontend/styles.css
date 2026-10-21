@@ -315,6 +315,8 @@ main { max-width: 1120px; margin: 0 auto; padding: 36px 32px 60px; }
 .badge.done        { color: var(--green);     background: #17301f; }
 .badge.error       { color: var(--red);       background: #391e19; }
 .badge.cancelling  { color: var(--red);       background: #391e19; }
+.badge.rendering   { color: var(--yellow);    background: #3a3016; }
+.badge.awaiting_roads { color: var(--blue);   background: #1c3040; }
 
 .progress {
   height: 5px; background: var(--asphalt-3); border-radius: 999px; overflow: hidden;
@@ -426,7 +428,7 @@ main { max-width: 1120px; margin: 0 auto; padding: 36px 32px 60px; }
 .video-wrap .vf.bl { bottom: 10px; left: 10px; border-bottom: 2px solid var(--yellow); border-left: 2px solid var(--yellow); }
 .video-wrap .vf.br { bottom: 10px; right: 10px; border-bottom: 2px solid var(--yellow); border-right: 2px solid var(--yellow); }
 
-.tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 20px 0; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 14px; margin: 20px 0; }
 .tile {
   background: var(--asphalt-2); border: 1px solid var(--line);
   border-radius: var(--radius); padding: 20px; text-align: center;
@@ -478,22 +480,6 @@ td { font-variant-numeric: tabular-nums; }
 .meta-strip .v { font-family: var(--font-display); font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .meta-strip .k { font-size: 10.5px; color: var(--paint-dim); text-transform: uppercase; letter-spacing: 0.4px; }
 
-.road-snapshot {
-  margin-bottom: 16px; border-radius: var(--radius); overflow: hidden;
-  border: 1px solid var(--line);
-}
-.road-snapshot img { width: 100%; display: block; }
-
-.road-summary { display: flex; gap: 14px; margin-bottom: 16px; }
-.road-figure {
-  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px;
-  background: var(--asphalt); border: 1px solid var(--line); border-radius: var(--radius-sm);
-  padding: 14px 10px; text-align: center;
-}
-.road-figure .big { font-family: var(--font-display); font-size: 26px; font-weight: 600; color: var(--yellow); }
-.road-figure .cap { font-size: 11px; color: var(--paint-dim); text-transform: uppercase; letter-spacing: 0.3px; }
-.road-note { margin-top: 10px; font-size: 12px; }
-
 .notice {
   background: #2a2410; border: 1px solid #4a3d15; color: #f3d98a;
   padding: 16px 18px; border-radius: var(--radius); font-size: 13.5px;
@@ -520,9 +506,187 @@ td { font-variant-numeric: tabular-nums; }
 }
 
 @media (max-width: 640px) {
-  .tiles { grid-template-columns: 1fr; }
+  .tiles { grid-template-columns: repeat(2, 1fr); }
   .meta-strip { flex-wrap: wrap; row-gap: 10px; }
   main { padding: 24px 18px 44px; }
   .topbar { padding: 16px 18px; }
   .url-add { flex-direction: column; }
+}
+
+/* =====================================================================
+ * Per-road counting
+ * ===================================================================== */
+
+.retry-btn.primary { background: var(--yellow); color: var(--yellow-ink); border-color: var(--yellow); }
+.retry-btn.primary:hover { background: #ffc63d; border-color: #ffc63d; }
+.retry-btn:disabled { opacity: 0.5; cursor: default; }
+a.retry-btn { text-decoration: none; }
+.card-phase { font-size: 12px; }
+.progress.big { height: 8px; margin-top: 12px; }
+
+/* --- "How many roads?" dialog --- */
+.road-dialog {
+  background: var(--asphalt-2); color: var(--paint);
+  border: 1px solid var(--line); border-top: 3px solid var(--yellow);
+  border-radius: var(--radius); padding: 22px 24px; width: min(460px, calc(100vw - 32px));
+  box-shadow: var(--shadow);
+}
+.road-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+.road-dialog h3 { margin: 0 0 4px; font-family: var(--font-display); font-weight: 600; font-size: 18px; }
+.road-dialog .muted { margin: 0 0 16px; word-break: break-all; }
+.road-count-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.road-count-btn {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  background: var(--asphalt); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  color: var(--paint); padding: 10px 4px 8px; cursor: pointer;
+  font-family: var(--font-display); font-size: 18px; font-weight: 600;
+  transition: border-color 0.15s, background 0.15s;
+}
+.road-count-btn svg { width: 34px; height: 34px; stroke: var(--paint-dim); stroke-width: 3.2; stroke-linecap: round; fill: var(--paint-dim); }
+.road-count-btn:hover, .road-count-btn:focus-visible { border-color: var(--yellow); background: #2d2a1a; }
+.road-count-btn:hover svg, .road-count-btn:focus-visible svg { stroke: var(--yellow); fill: var(--yellow); }
+.road-count-btn.suggested { border-color: #5a4a1c; }
+.road-dialog .hint { margin: 14px 0 0; }
+.dialog-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+
+/* --- road chips (cards, legend, table) --- */
+.card-roads { display: flex; flex-wrap: wrap; gap: 6px; }
+.road-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--paint-dim);
+  background: var(--asphalt); border: 1px solid var(--line); border-radius: 999px;
+  padding: 3px 9px; white-space: nowrap;
+}
+.road-chip i { width: 8px; height: 8px; border-radius: 2px; background: var(--road); flex: none; }
+.road-chip b { color: var(--paint); font-family: var(--font-display); font-weight: 600; }
+.road-chip.big { font-size: 13px; padding: 6px 12px; cursor: pointer; font-family: inherit; }
+.road-chip.big:hover { border-color: var(--road); color: var(--paint); }
+
+.detail-toolbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: -6px 0 4px; }
+.road-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: -4px 0 16px; }
+
+.overview-panel summary {
+  cursor: pointer; font-family: var(--font-display); font-weight: 600; font-size: 14.5px;
+  list-style: none; display: flex; align-items: center; gap: 8px;
+}
+.overview-panel summary::-webkit-details-marker { display: none; }
+.overview-panel summary::before { content: "▸"; color: var(--paint-dim); transition: transform 0.15s; }
+.overview-panel[open] summary::before { transform: rotate(90deg); }
+.overview-panel[open] summary { margin-bottom: 14px; }
+
+/* --- one block per road --- */
+.road-block {
+  margin-top: 18px; background: var(--asphalt-2);
+  border: 1px solid var(--line); border-left: 4px solid var(--road);
+  border-radius: var(--radius); padding: 18px; scroll-margin-top: 110px;
+}
+.road-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.road-head h3 { margin: 0; font-family: var(--font-display); font-weight: 600; font-size: 17px; }
+.road-swatch { width: 12px; height: 12px; border-radius: 3px; background: var(--road); flex: none; }
+.road-total { margin-left: auto; color: var(--paint-dim); font-size: 13px; }
+.road-total b { color: var(--paint); font-family: var(--font-display); font-size: 18px; margin-right: 2px; }
+
+.road-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+.road-video { box-shadow: none; }
+.road-video video { max-height: 420px; object-fit: contain; background: #000; }
+.road-side { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+.type-pills { display: flex; flex-wrap: wrap; gap: 8px; }
+.type-pill {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--asphalt); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 6px 10px;
+}
+.type-pill .v-icon { margin-right: 0; }
+.type-pill .num { font-family: var(--font-display); font-size: 17px; font-weight: 600; color: var(--type); }
+.type-pill .lbl { font-size: 11px; color: var(--paint-dim); text-transform: uppercase; letter-spacing: 0.3px; }
+
+.timeline { background: var(--asphalt); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px 8px; }
+.timeline-head { display: flex; justify-content: space-between; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+.timeline-head .muted { font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.tl-graph { width: 100%; height: 130px; display: block; cursor: pointer; overflow: visible; }
+.tl-graph text { fill: var(--paint-faint); font-size: 10px; font-family: var(--font-body); }
+.tl-axis { stroke: var(--line); stroke-width: 1; }
+.tl-grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 3 4; }
+.tl-type { fill: none; stroke-width: 1.4; opacity: 0.85; vector-effect: non-scaling-stroke; }
+.tl-all { fill: none; stroke: var(--road); stroke-width: 2.6; vector-effect: non-scaling-stroke; }
+.tl-playhead { stroke: var(--paint); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.tl-legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--paint-dim); margin-top: 4px; }
+.tl-legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+
+.event-list {
+  max-height: 210px; overflow-y: auto; position: relative;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--asphalt);
+}
+.event {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  background: none; border: none; border-bottom: 1px solid var(--asphalt-3);
+  color: var(--paint-dim); padding: 7px 10px; font-size: 13px; text-align: left; cursor: pointer;
+}
+.event:last-child { border-bottom: none; }
+.event:hover { background: var(--asphalt-3); color: var(--paint); }
+.event .v-icon { margin-right: 2px; }
+.event-t { font-variant-numeric: tabular-nums; width: 38px; color: var(--paint-faint); }
+.event-type { flex: 1; text-transform: capitalize; }
+.event-id { color: var(--paint-faint); font-size: 12px; }
+.event.past { color: var(--paint); }
+.event.past .event-t { color: var(--paint-dim); }
+.event.current { background: color-mix(in srgb, var(--road) 16%, transparent); box-shadow: inset 3px 0 0 var(--road); }
+
+.table-scroll { overflow-x: auto; }
+
+/* --- road editor --- */
+.editor-intro { margin-bottom: 16px; }
+.editor { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 18px; align-items: start; }
+.editor-stage {
+  position: relative; border-radius: var(--radius); overflow: hidden;
+  border: 1px solid var(--line); background: #000; user-select: none; touch-action: none;
+}
+.editor-stage img { display: block; width: 100%; height: auto; pointer-events: none; }
+.editor-stage svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.editor-stage svg.drawing { cursor: crosshair; }
+.ed-path { fill: none; stroke: #fff; opacity: 0.28; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+.ed-poly { fill-opacity: 0.18; cursor: move; stroke-linejoin: round; }
+.ed-poly.sel { fill-opacity: 0.3; }
+.ed-label { cursor: move; }
+.ed-label text { fill: #1b1d1f; font-family: var(--font-display); font-weight: 600; pointer-events: none; }
+.ed-vtx { fill: #fff; cursor: grab; }
+.ed-vtx.closer { fill: var(--yellow); cursor: pointer; }
+.ed-mid { fill: #fff; opacity: 0.55; cursor: copy; }
+.ed-mid:hover { opacity: 1; }
+.ed-drawing { fill: none; stroke-dasharray: 6 5; pointer-events: none; }
+
+.editor-side {
+  background: var(--asphalt-2); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 16px; display: flex; flex-direction: column; gap: 12px;
+  position: sticky; top: 110px;
+}
+.ed-list { display: flex; flex-direction: column; gap: 6px; }
+.ed-row {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--asphalt);
+  cursor: pointer;
+}
+.ed-row.sel { border-color: var(--road); box-shadow: inset 3px 0 0 var(--road); }
+.ed-row input {
+  flex: 1; min-width: 0; background: transparent; border: 1px solid transparent; color: var(--paint);
+  font-size: 13px; padding: 4px 6px; border-radius: 4px;
+}
+.ed-row input:focus { outline: none; border-color: var(--line); background: var(--asphalt-3); }
+.ed-row .link { font-size: 12px; }
+.ed-del {
+  background: none; border: none; color: var(--paint-faint); cursor: pointer; font-size: 13px; padding: 2px 4px;
+}
+.ed-del:hover:not(:disabled) { color: var(--red); }
+.ed-del:disabled { opacity: 0.3; cursor: default; }
+.ed-tools { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 12px; font-size: 13px; }
+.ed-tools .link { white-space: nowrap; }
+.ed-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--paint-dim); cursor: pointer; }
+.ed-help { font-size: 12.5px; color: var(--paint-dim); line-height: 1.5; background: var(--asphalt); border-radius: var(--radius-sm); padding: 10px 12px; }
+.ed-confirm { justify-content: center; padding: 11px 14px; font-size: 13.5px; }
+
+@media (max-width: 900px) {
+  .road-grid { grid-template-columns: 1fr; }
+  .editor { grid-template-columns: 1fr; }
+  .editor-side { position: static; }
 }

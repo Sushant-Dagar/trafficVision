@@ -15,7 +15,8 @@ from typing import Any, Optional
 
 from . import config
 
-# Valid statuses: downloading -> queued -> processing -> done | error
+# Valid statuses: downloading -> queued -> processing -> awaiting_roads -> queued
+# -> rendering -> done | error
 # ("cancelling" is a transitional status for a downloading/processing job
 # whose removal was requested — see request_cancel below.)
 _LOCK = threading.RLock()
@@ -76,6 +77,7 @@ def create_job(
     source_url: str | None = None,
     status: str = "queued",
     pending_trim: dict | None = None,
+    road_count: int = 4,
 ) -> dict[str, Any]:
     """Register a video job and return its record.
 
@@ -94,13 +96,20 @@ def create_job(
         "original_name": original_name,
         "stored_name": stored_name,       # filename inside storage/uploads
         "source_url": source_url,          # None for local uploads
-        "status": status,                  # downloading | queued | processing | done | error
+        # downloading -> queued -> processing (detect + track) -> awaiting_roads
+        # (user adjusts road outlines) -> queued -> rendering -> done | error
+        "status": status,
         "created_at": time.time(),
         "updated_at": time.time(),
         "progress": 0.0,                   # 0..1 during processing
         "error": None,
         "summary": None,                   # populated when done (see processor)
         "pending_trim": pending_trim,      # {"start", "end"} or None
+        "road_count": road_count,          # roads the user said meet at the junction
+        "stage": "analyse",                # which pass runs next: analyse | render
+        "roads": None,                     # confirmed outlines [{name, polygon}]
+        "suggested_roads": None,           # auto-suggested outlines from pass 1
+        "video_meta": None,                # {width, height, fps, frames}
     }
     with _LOCK:
         jobs = _read_all()
@@ -109,7 +118,9 @@ def create_job(
     return job
 
 
-def create_url_job(url: str, label: str | None = None, trim: dict | None = None) -> dict[str, Any]:
+def create_url_job(
+    url: str, label: str | None = None, trim: dict | None = None, road_count: int = 4
+) -> dict[str, Any]:
     """Register a remote-URL job in the ``downloading`` state (file not yet fetched)."""
     return create_job(
         original_name=label or url,
@@ -117,6 +128,7 @@ def create_url_job(url: str, label: str | None = None, trim: dict | None = None)
         source_url=url,
         status="downloading",
         pending_trim=trim,
+        road_count=road_count,
     )
 
 

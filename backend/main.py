@@ -18,7 +18,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, downloader, jobs, processor, trimmer
+from . import config, downloader, jobs, processor, roads as roadgeo, trimmer
 
 # ---------------------------------------------------------------------------
 # Background worker
@@ -93,12 +93,21 @@ def _download_if_needed(job_id: str) -> bool:
         return False
 
 
+# Statuses where the worker thread is actively using the job's files.
+RUNNING_STATUSES = ("downloading", "processing", "rendering")
+
+
 def _worker_loop() -> None:
     while True:
         job_id = _work_queue.get()
         try:
-            if _download_if_needed(job_id):
-                processor.process_video(job_id)
+            job = jobs.get_job(job_id)
+            if job is None:
+                continue
+            if job.get("stage") == "render":
+                processor.render_job(job_id)
+            elif _download_if_needed(job_id):
+                processor.analyse_video(job_id)
         except Exception:  # noqa: BLE001 - never let the worker thread die
             import traceback
 
@@ -132,7 +141,7 @@ async def lifespan(app: FastAPI):
     for job in jobs.list_jobs():
         if job["status"] == "queued":
             _work_queue.put(job["id"])
-        elif job["status"] in ("downloading", "processing"):
+        elif job["status"] in RUNNING_STATUSES:
             jobs.update_job(
                 job["id"],
                 status="error",
@@ -190,12 +199,26 @@ def _parse_trim_window(start: Any, end: Any, duration: Any) -> dict | None:
     return {"start": start, "end": end}
 
 
+def _parse_road_count(raw: Any) -> int:
+    """Number of roads meeting at the junction (default 4)."""
+    if raw in (None, ""):
+        return 4
+    try:
+        n = int(float(raw))
+    except (TypeError, ValueError):
+        raise ValueError("Number of roads must be a whole number.")
+    if not 1 <= n <= roadgeo.MAX_ROADS:
+        raise ValueError(f"Number of roads must be between 1 and {roadgeo.MAX_ROADS}.")
+    return n
+
+
 @app.post("/api/videos")
 async def upload_video(
     file: UploadFile = File(...),
     trim_start: Any = Form(None),
     trim_end: Any = Form(None),
     trim_duration: Any = Form(None),
+    road_count: Any = Form(None),
 ):
     """Accept a video upload, register a job, and queue it for processing.
 
@@ -205,6 +228,7 @@ async def upload_video(
     """
     try:
         trim_window = _parse_trim_window(trim_start, trim_end, trim_duration)
+        n_roads = _parse_road_count(road_count)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -219,7 +243,7 @@ async def upload_video(
 
     # Create the job first so we get an id to name the stored file with.
     stored_name = "pending"  # placeholder; replaced below
-    job = jobs.create_job(original_name=original_name, stored_name=stored_name)
+    job = jobs.create_job(original_name=original_name, stored_name=stored_name, road_count=n_roads)
     stored_name = f"{job['id']}{ext}"
     dest = config.UPLOAD_DIR / stored_name
 
@@ -270,6 +294,7 @@ async def add_video_from_url(payload: dict):
         trim_window = _parse_trim_window(
             payload.get("start"), payload.get("end"), payload.get("duration")
         )
+        n_roads = _parse_road_count(payload.get("road_count"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -285,7 +310,7 @@ async def add_video_from_url(payload: dict):
 
     created = []
     for u in urls:
-        job = jobs.create_url_job(u, trim=trim_window)
+        job = jobs.create_url_job(u, trim=trim_window, road_count=n_roads)
         _work_queue.put(job["id"])
         created.append(job["id"])
 
@@ -307,6 +332,7 @@ async def list_videos():
                 "error": job.get("error"),
                 "summary": job.get("summary"),
                 "source_url": job.get("source_url"),
+                "road_count": job.get("road_count"),
             }
         )
     return result
@@ -336,8 +362,10 @@ async def video_detail(job_id: str):
         "summary": job.get("summary"),
         "source_url": job.get("source_url"),
         "stats": stats,
+        "road_count": job.get("road_count"),
+        "stage": job.get("stage"),
+        "can_edit_roads": processor.tracks_path(job_id).exists() and job["status"] not in RUNNING_STATUSES + ("cancelling",),
         "video_url": f"/api/videos/{job_id}/video" if job["status"] == "done" else None,
-        "roadmap_url": f"/api/videos/{job_id}/roadmap" if (config.OUTPUT_DIR / f"{job_id}_roadmap.jpg").exists() else None,
     }
 
 
@@ -351,13 +379,82 @@ async def get_output_video(job_id: str):
     return FileResponse(str(path), media_type="video/mp4", filename=f"{job_id}.mp4")
 
 
-@app.get("/api/videos/{job_id}/roadmap")
-async def get_roadmap_image(job_id: str):
-    """Serve the static snapshot with estimated roads/lanes drawn on it."""
-    path = config.OUTPUT_DIR / f"{job_id}_roadmap.jpg"
+@app.get("/api/videos/{job_id}/roads/{index}/video")
+async def get_road_video(job_id: str, index: int):
+    """Serve the video cropped to one road."""
+    path = processor.road_video_path(job_id, index)
     if not path.exists():
-        raise HTTPException(status_code=404, detail="Road-layout image not available for this video.")
+        raise HTTPException(status_code=404, detail="Road video not ready")
+    return FileResponse(str(path), media_type="video/mp4", filename=f"{job_id}_road{index + 1}.mp4")
+
+
+@app.get("/api/videos/{job_id}/frame")
+async def get_reference_frame(job_id: str):
+    """A clean still from the video, used as the road editor's background."""
+    path = processor.frame_path(job_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Frame not available yet")
     return FileResponse(str(path), media_type="image/jpeg")
+
+
+@app.get("/api/videos/{job_id}/roads-setup")
+async def roads_setup(job_id: str):
+    """Everything the road editor needs: frame size, current/suggested road
+    outlines, and thinned vehicle paths to draw underneath them."""
+    import json
+
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    path = processor.analysis_path(job_id)
+    if not path.exists():
+        raise HTTPException(status_code=409, detail="This video hasn't been analysed yet.")
+    with path.open("r", encoding="utf-8") as fh:
+        analysis = json.load(fh)
+    return {
+        "width": analysis["width"],
+        "height": analysis["height"],
+        "frame_url": f"/api/videos/{job_id}/frame",
+        "road_count": job.get("road_count"),
+        "roads": job.get("roads") or analysis["suggested_roads"],
+        "suggested_roads": analysis["suggested_roads"],
+        "trajectories": analysis.get("trajectories", []),
+        "colors": roadgeo.ROAD_COLORS_HEX,
+        "max_roads": roadgeo.MAX_ROADS,
+    }
+
+
+@app.post("/api/videos/{job_id}/roads")
+async def confirm_roads(job_id: str, payload: dict):
+    """Save the user's road outlines and render per-road results.
+
+    Body: {"roads": [{"name": str, "polygon": [[x, y], ...]}]} with x/y
+    normalised to 0..1. Works on a video waiting for roads or one that's
+    already done (re-render with new outlines - no re-detection needed).
+    """
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] in RUNNING_STATUSES + ("cancelling", "queued"):
+        raise HTTPException(status_code=409, detail="This video is still running — wait for it to finish first.")
+    if not processor.tracks_path(job_id).exists():
+        raise HTTPException(status_code=409, detail="This video hasn't been analysed yet — click Reprocess.")
+    try:
+        cleaned = roadgeo.validate_roads((payload or {}).get("roads"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    jobs.update_job(
+        job_id,
+        roads=cleaned,
+        road_count=len(cleaned),
+        stage="render",
+        status="queued",
+        progress=0.0,
+        error=None,
+    )
+    _work_queue.put(job_id)
+    return {"ok": True, "status": "queued"}
 
 
 @app.delete("/api/videos/{job_id}")
@@ -375,7 +472,7 @@ async def delete_video(job_id: str):
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if job["status"] in ("downloading", "processing"):
+    if job["status"] in RUNNING_STATUSES:
         jobs.request_cancel(job_id)
         return {"ok": True, "status": "cancelling"}
     if job["status"] == "cancelling":
@@ -406,7 +503,7 @@ async def bulk_delete_videos(payload: dict):
         if job is None:
             not_found.append(job_id)
             continue
-        if job["status"] in ("downloading", "processing"):
+        if job["status"] in RUNNING_STATUSES:
             jobs.request_cancel(job_id)
             cancelling.append(job_id)
         elif job["status"] == "cancelling":
@@ -417,6 +514,38 @@ async def bulk_delete_videos(payload: dict):
             deleted.append(job_id)
 
     return {"ok": True, "deleted": deleted, "cancelling": cancelling, "not_found": not_found}
+
+
+def _requeue(job: dict, road_count: int | None = None) -> None:
+    """Put a failed/finished job back in the queue.
+
+    - A failure during the render pass (with tracking data still on disk) only
+      re-runs the render - no need to detect everything again.
+    - Anything else re-runs detection from scratch; previously confirmed road
+      outlines are kept and offered again in the editor.
+    """
+    job_id = job["id"]
+    fields: dict[str, Any] = {"progress": 0.0, "error": None}
+    if road_count is not None and road_count != job.get("road_count"):
+        fields["road_count"] = road_count
+        fields["roads"] = None  # different number of roads: start from fresh suggestions
+
+    if (
+        job["status"] == "error"
+        and job.get("stage") == "render"
+        and job.get("roads")
+        and processor.tracks_path(job_id).exists()
+    ):
+        jobs.update_job(job_id, status="queued", stage="render", **fields)
+    else:
+        stored_name = job.get("stored_name")
+        have_file = bool(stored_name) and stored_name != "pending" and (config.UPLOAD_DIR / stored_name).exists()
+        status = "downloading" if job.get("source_url") and not have_file else "queued"
+        jobs.update_job(job_id, status=status, stage="analyse", **fields)
+    _work_queue.put(job_id)
+
+
+RETRYABLE_STATUSES = ("error", "done", "awaiting_roads")
 
 
 @app.post("/api/videos/bulk-retry")
@@ -434,40 +563,33 @@ async def bulk_retry_videos(payload: dict):
     retried, skipped = [], []
     for job_id in ids:
         job = jobs.get_job(job_id)
-        if job is None or job["status"] not in ("error", "done"):
+        if job is None or job["status"] not in RETRYABLE_STATUSES:
             skipped.append(job_id)
             continue
-        stored_name = job.get("stored_name")
-        have_file = bool(stored_name) and stored_name != "pending" and (config.UPLOAD_DIR / stored_name).exists()
-        if job.get("source_url") and not have_file:
-            jobs.update_job(job_id, status="downloading", progress=0.0, error=None)
-        else:
-            jobs.update_job(job_id, status="queued", progress=0.0, error=None)
-        _work_queue.put(job_id)
+        _requeue(job)
         retried.append(job_id)
 
     return {"ok": True, "retried": retried, "skipped": skipped}
 
 
 @app.post("/api/videos/{job_id}/retry")
-async def retry_video(job_id: str):
-    """Re-run a job: re-download+process a failed one, or just re-process a
-    completed one (e.g. to pick up stats fields added by a newer app version)."""
+async def retry_video(job_id: str, payload: dict | None = None):
+    """Re-run a job: resume a failed one, or re-detect a finished one.
+
+    Optional body: {"road_count": n} to change how many roads to look for.
+    """
     job = jobs.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job["status"] not in ("error", "done"):
+    if job["status"] not in RETRYABLE_STATUSES:
         raise HTTPException(status_code=409, detail="This video can't be retried right now — it's still running.")
-
-    stored_name = job.get("stored_name")
-    have_file = bool(stored_name) and stored_name != "pending" and (config.UPLOAD_DIR / stored_name).exists()
-
-    if job.get("source_url") and not have_file:
-        jobs.update_job(job_id, status="downloading", progress=0.0, error=None)
-    else:
-        jobs.update_job(job_id, status="queued", progress=0.0, error=None)
-
-    _work_queue.put(job_id)
+    road_count = None
+    if payload and payload.get("road_count") not in (None, ""):
+        try:
+            road_count = _parse_road_count(payload.get("road_count"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _requeue(job, road_count)
     return {"ok": True, "status": jobs.get_job(job_id)["status"]}
 
 
@@ -487,7 +609,7 @@ async def trim_video(job_id: str, payload: dict):
     job = jobs.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job["status"] in ("downloading", "processing"):
+    if job["status"] in RUNNING_STATUSES + ("cancelling", "queued"):
         raise HTTPException(
             status_code=409,
             detail="This video is still running — wait for it to finish or fail before trimming.",
@@ -524,14 +646,12 @@ async def trim_video(job_id: str, payload: dict):
     except trimmer.TrimError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # Drop stale outputs from the previous run so the detail view doesn't show
-    # results for footage that no longer exists once this re-processes.
-    for suffix in (".mp4", ".json", "_roadmap.jpg"):
-        stale = config.OUTPUT_DIR / f"{job_id}{suffix}"
+    # Drop every output from the previous run (videos, stats, tracking data):
+    # they describe footage that no longer exists. Road outlines are kept in
+    # the job record and offered again once the shorter clip is analysed.
+    for stale in config.OUTPUT_DIR.glob(f"{job_id}*"):
         try:
             stale.unlink()
-        except FileNotFoundError:
-            pass
         except OSError:
             pass
 
@@ -539,6 +659,7 @@ async def trim_video(job_id: str, payload: dict):
         job_id,
         stored_name=new_stored_name,
         status="queued",
+        stage="analyse",
         progress=0.0,
         error=None,
         summary=None,
