@@ -93,6 +93,10 @@ def _download_if_needed(job_id: str) -> bool:
         return False
 
 
+# Outputs are rewritten in place when roads are edited or a video is reprocessed,
+# so make browsers check for a newer file instead of reusing a cached one.
+NO_CACHE = {"Cache-Control": "no-cache"}
+
 # Statuses where the worker thread is actively using the job's files.
 RUNNING_STATUSES = ("downloading", "processing", "rendering")
 
@@ -365,7 +369,11 @@ async def video_detail(job_id: str):
         "road_count": job.get("road_count"),
         "stage": job.get("stage"),
         "can_edit_roads": processor.tracks_path(job_id).exists() and job["status"] not in RUNNING_STATUSES + ("cancelling",),
-        "video_url": f"/api/videos/{job_id}/video" if job["status"] == "done" else None,
+        "video_url": (
+            f"/api/videos/{job_id}/video?v={(stats or {}).get('version', 0)}"
+            if job["status"] == "done"
+            else None
+        ),
     }
 
 
@@ -376,7 +384,9 @@ async def get_output_video(job_id: str):
     path = config.OUTPUT_DIR / f"{job_id}.mp4"
     if not path.exists():
         raise HTTPException(status_code=404, detail="Output video not ready")
-    return FileResponse(str(path), media_type="video/mp4", filename=f"{job_id}.mp4")
+    return FileResponse(
+        str(path), media_type="video/mp4", filename=f"{job_id}.mp4", headers=NO_CACHE
+    )
 
 
 @app.get("/api/videos/{job_id}/roads/{index}/video")
@@ -385,7 +395,9 @@ async def get_road_video(job_id: str, index: int):
     path = processor.road_video_path(job_id, index)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Road video not ready")
-    return FileResponse(str(path), media_type="video/mp4", filename=f"{job_id}_road{index + 1}.mp4")
+    return FileResponse(
+        str(path), media_type="video/mp4", filename=f"{job_id}_road{index + 1}.mp4", headers=NO_CACHE
+    )
 
 
 @app.get("/api/videos/{job_id}/frame")
@@ -394,7 +406,7 @@ async def get_reference_frame(job_id: str):
     path = processor.frame_path(job_id)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Frame not available yet")
-    return FileResponse(str(path), media_type="image/jpeg")
+    return FileResponse(str(path), media_type="image/jpeg", headers=NO_CACHE)
 
 
 @app.get("/api/videos/{job_id}/roads-setup")

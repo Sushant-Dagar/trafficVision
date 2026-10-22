@@ -846,9 +846,17 @@ function renderRoadBlock(r, duration) {
       <div class="road-grid">
         <div class="road-video video-wrap"><video src="${r.video_url}" controls playsinline muted preload="metadata"></video></div>
         <div class="road-side">
+          <div class="side-label">Came from this road (whole video)</div>
           <div class="type-pills">${pills}</div>
+          <div class="now-box">
+            <div class="now-head">
+              <span>On this road at <b data-now-t>0:00</b></span>
+              <span class="now-total"><b data-now-n>0</b> vehicle<span data-now-s>s</span></span>
+            </div>
+            <div class="now-types" data-now-types></div>
+          </div>
           <div class="timeline">
-            <div class="timeline-head"><span>Vehicles over time</span><span class="muted" data-now>0:00 · 0 so far</span></div>
+            <div class="timeline-head"><span>Counted over time</span><span class="muted" data-now>0:00 · 0 counted so far</span></div>
             ${renderTimelineGraph(r, duration, types)}
           </div>
           <div class="event-list" data-events>${events}</div>
@@ -907,6 +915,37 @@ function wireRoadBlock(r, duration) {
   const nowLbl = block.querySelector("[data-now]");
   const list = block.querySelector("[data-events]");
   const buttons = [...list.querySelectorAll(".event")];
+  const nowT = block.querySelector("[data-now-t]");
+  const nowN = block.querySelector("[data-now-n]");
+  const nowS = block.querySelector("[data-now-s]");
+  const nowTypes = block.querySelector("[data-now-types]");
+  const presence = r.presence;
+  let lastNowKey = "";
+
+  /** Vehicles whose ground point is inside this road's outline at time t. */
+  const updateNow = (t) => {
+    nowT.textContent = fmtTime(t);
+    if (!presence) {
+      nowN.textContent = "–";
+      nowTypes.innerHTML = `<span class="muted">Click Edit roads → Save &amp; recount to see this.</span>`;
+      return;
+    }
+    const here = presence.filter((p) => p.start <= t && t < p.end);
+    const byType = {};
+    here.forEach((p) => (byType[p.type] = (byType[p.type] || 0) + 1));
+    const key = here.map((p) => p.id).join(",");
+    if (key === lastNowKey && nowN.textContent !== "") return;
+    lastNowKey = key;
+    nowN.textContent = here.length;
+    nowS.textContent = here.length === 1 ? "" : "s";
+    const types = Object.keys(byType).sort((a, b) => byType[b] - byType[a]);
+    nowTypes.innerHTML = types.length
+      ? types
+          .map((t) => `<span class="now-type">${vehicleIcon(t)}<b>${byType[t]}</b> ${escapeHtml(t)}</span>`)
+          .join("") +
+        `<span class="now-ids muted">${here.map((p) => "#" + p.id).join(" ")}</span>`
+      : `<span class="muted">No vehicles on this road right now.</span>`;
+  };
   const dur = parseFloat(graph.dataset.dur);
   const padL = parseFloat(graph.dataset.padl);
   const padR = parseFloat(graph.dataset.padr);
@@ -921,7 +960,8 @@ function wireRoadBlock(r, duration) {
     playhead.setAttribute("x2", px);
     let passed = -1;
     while (passed + 1 < r.events.length && r.events[passed + 1].t <= t) passed++;
-    nowLbl.textContent = `${fmtTime(t)} · ${passed + 1} so far`;
+    nowLbl.textContent = `${fmtTime(t)} · ${passed + 1} counted so far`;
+    updateNow(t);
     if (passed !== lastPassed) {
       buttons.forEach((b, i) => {
         b.classList.toggle("past", i <= passed);
@@ -946,6 +986,7 @@ function wireRoadBlock(r, duration) {
     if (!raf) raf = requestAnimationFrame(loop);
   });
   video.addEventListener("seeked", sync);
+  video.addEventListener("loadedmetadata", sync);
   video.addEventListener("timeupdate", () => {
     if (video.paused) sync();
   });

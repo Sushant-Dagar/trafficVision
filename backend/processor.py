@@ -380,6 +380,10 @@ def render_job(job_id: str) -> None:
         if not cap.isOpened():
             raise RuntimeError("Could not reopen the source video.")
 
+        presence, on_road_counts = _road_presence(
+            all_rows, starts, polys, total_frames, max(2, int(round(fps * 0.25)))
+        )
+
         frame_idx = 0
         while True:
             if jobs.is_cancelled(job_id):
@@ -397,6 +401,8 @@ def render_job(job_id: str) -> None:
             hi = starts[frame_idx + 1] if frame_idx + 1 < len(starts) else len(all_rows)
             dets = all_rows[lo:hi]
 
+            on_road_now = [int(c[frame_idx]) if frame_idx < len(c) else 0 for c in on_road_counts]
+
             # --- overview: tinted road outlines + every vehicle coloured by road
             over = frame.copy()
             blended = cv2.addWeighted(over, 0.8, fill_layer, 0.2, 0)
@@ -413,7 +419,7 @@ def render_job(job_id: str) -> None:
             for i, p in enumerate(polys):
                 count = int(np.searchsorted(arrivals_by_road[i], frame_idx, side="right"))
                 cx, cy = p.mean(axis=0)
-                _draw_tag(over, f"{road_defs[i]['name']}: {count}", (cx - 40, cy), colors[i])
+                _draw_tag(over, f"{road_defs[i]['name']}: {count} counted", (cx - 40, cy), colors[i])
             overview_writer.append_data(cv2.cvtColor(over, cv2.COLOR_BGR2RGB))
 
             # --- one cropped video per road
@@ -434,7 +440,8 @@ def render_job(job_id: str) -> None:
                     else:
                         _draw_box(crop, box, None, (150, 150, 150), 1)
                 count = int(np.searchsorted(arrivals_by_road[i], frame_idx, side="right"))
-                _draw_tag(crop, f"{road_defs[i]['name']}: {count}", (10, 26), colors[i])
+                _draw_tag(crop, f"Counted: {count}", (10, 26), colors[i])
+                _draw_tag(crop, f"On road now: {on_road_now[i]}", (10, 56), (235, 235, 235))
                 road_writers[i].append_data(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
 
             if total_frames and frame_idx % 20 == 0:
@@ -446,7 +453,9 @@ def render_job(job_id: str) -> None:
         cap.release()
         cap = None
 
-        stats = _build_stats(job_id, road_defs, vehicles, assignment, crops, w, h, fps, frame_idx)
+        stats = _build_stats(
+            job_id, road_defs, vehicles, assignment, crops, w, h, fps, frame_idx, presence
+        )
         with (config.OUTPUT_DIR / f"{job_id}.json").open("w", encoding="utf-8") as fh:
             json.dump(stats, fh, indent=2)
 
@@ -487,7 +496,59 @@ def render_job(job_id: str) -> None:
         traceback.print_exc()
 
 
-def _build_stats(job_id, road_defs, vehicles, assignment, crops, w, h, fps, frames) -> dict[str, Any]:
+def _road_presence(all_rows, starts, polys, total_frames, gap):
+    """Which vehicles are on each road, as time intervals.
+
+    Returns (presence, counts):
+      presence[road] = [(track_id, first_frame, last_frame), ...]
+      counts[road][frame] = vehicles on that road in that frame
+    A vehicle missing for up to ``gap`` frames (detector flicker) keeps one
+    interval instead of being split into several. Both the on-video counter
+    and the web page read these same intervals, so they always agree.
+    """
+    open_seg: dict[tuple[int, int], list[int]] = {}
+    presence: list[list[tuple[int, int, int]]] = [[] for _ in polys]
+    for frame_no in range(1, total_frames + 1):
+        lo = starts[frame_no] if frame_no < len(starts) else len(all_rows)
+        hi = starts[frame_no + 1] if frame_no + 1 < len(starts) else len(all_rows)
+        dets = all_rows[lo:hi]
+        if not len(dets):
+            continue
+        gpts = roadgeo.ground_points(dets)
+        tids = dets[:, roadgeo.COL_TID].astype(np.int64)
+        for i, p in enumerate(polys):
+            for tid in tids[roadgeo.points_in_polygon(gpts, p)].tolist():
+                seg = open_seg.get((i, tid))
+                if seg and frame_no - seg[1] <= gap + 1:
+                    seg[1] = frame_no
+                else:
+                    if seg:
+                        presence[i].append((tid, seg[0], seg[1]))
+                    open_seg[(i, tid)] = [frame_no, frame_no]
+    for (i, tid), seg in open_seg.items():
+        presence[i].append((tid, seg[0], seg[1]))
+
+    counts = []
+    for segs in presence:
+        diff = np.zeros(total_frames + 2, dtype=np.int64)
+        for _tid, f0, f1 in segs:
+            diff[f0] += 1
+            diff[f1 + 1] -= 1
+        counts.append(np.cumsum(diff))
+    return presence, counts
+
+
+def _frame_time(frame_no: int, fps: float) -> float:
+    """Playback time (s) at which 1-based frame ``frame_no`` appears in the video."""
+    return round((frame_no - 1) / fps, 3)
+
+
+def _build_stats(job_id, road_defs, vehicles, assignment, crops, w, h, fps, frames, presence) -> dict[str, Any]:
+    import time
+
+    # Changes on every render, so browsers fetch the new road videos instead of
+    # replaying a cached copy from before the roads were edited.
+    version = int(time.time())
     per_type: Counter = Counter()
     per_cat: Counter = Counter()
     road_stats = []
@@ -500,11 +561,25 @@ def _build_stats(job_id, road_defs, vehicles, assignment, crops, w, h, fps, fram
                 "color": roadgeo.road_color_hex(i),
                 "polygon": r["polygon"],
                 "crop": [x, y, cw, ch],
-                "video_url": f"/api/videos/{job_id}/roads/{i}/video",
+                "video_url": f"/api/videos/{job_id}/roads/{i}/video?v={version}",
                 "total": 0,
                 "by_type": Counter(),
                 "categories": Counter(),
                 "events": [],
+                # Every stretch of time a vehicle was on this road (any origin,
+                # counted or not), for the "on this road now" readout.
+                "presence": sorted(
+                    (
+                        {
+                            "id": int(tid),
+                            "type": vehicles[tid]["type"],
+                            "start": _frame_time(f0, fps),
+                            "end": _frame_time(f1 + 1, fps),
+                        }
+                        for tid, f0, f1 in presence[i]
+                    ),
+                    key=lambda p: p["start"],
+                ),
             }
         )
 
@@ -515,7 +590,7 @@ def _build_stats(job_id, road_defs, vehicles, assignment, crops, w, h, fps, fram
         road = assignment.get(tid)
         row = {k: v[k] for k in ("id", "type", "category", "wheels", "confidence", "frames_seen")}
         row["road"] = road[0] if road else None
-        row["t"] = round((road[1] if road else v["first_frame"]) / fps, 2)
+        row["t"] = _frame_time(road[1] if road else v["first_frame"], fps)
         vehicle_rows.append(row)
         if road:
             rs = road_stats[road[0]]
@@ -542,4 +617,5 @@ def _build_stats(job_id, road_defs, vehicles, assignment, crops, w, h, fps, fram
         "fps": round(fps, 2),
         "duration": round(frames / fps, 2) if fps else 0,
         "resolution": f"{w}x{h}",
+        "version": version,
     }
