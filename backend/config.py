@@ -46,6 +46,15 @@ TRACKER = "bytetrack.yaml"
 # spurious one-frame detections that would otherwise inflate the totals.
 MIN_TRACK_FRAMES = int(os.environ.get("MIN_TRACK_FRAMES", "3"))
 
+# Parked-vehicle filter: a vehicle seen for at least this many seconds whose
+# position never moves by more than a third of its own size is treated as
+# parked and isn't counted for any road. 8 s is longer than a car normally sits
+# still while queuing into view, so cars stopping at a red light near the end
+# of a clip aren't mistaken for parked ones. It can be switched off per video
+# in the road editor (e.g. a short clip where cars wait at a red light throughout).
+STATIONARY_MIN_SECONDS = float(os.environ.get("STATIONARY_MIN_SECONDS", "8.0"))
+STATIONARY_MOVE_FRACTION = float(os.environ.get("STATIONARY_MOVE_FRACTION", "0.35"))
+
 # Fallback FPS if the source video reports an invalid frame rate.
 DEFAULT_FPS = 25.0
 

@@ -764,7 +764,7 @@ function showRoadResults(jobId, data) {
             <i></i>${escapeHtml(r.name)} <b>${r.total}</b></button>`
         )
         .join("")}
-      ${s.unassigned ? `<span class="muted" title="Parked vehicles, vehicles outside every outline, and tracker fragments picked up mid-junction aren't counted for any road, so nothing is counted twice.">${s.unassigned} not counted for a road ⓘ</span>` : ""}
+      ${renderNotCounted(s)}
     </div>
 
     <details class="panel overview-panel">
@@ -813,6 +813,23 @@ function showRoadResults(jobId, data) {
     b.addEventListener("click", () => el(`#road-${b.dataset.jump}`).scrollIntoView({ behavior: "smooth", block: "start" }))
   );
   roads.forEach((r) => wireRoadBlock(r, duration));
+}
+
+const NOT_COUNTED = {
+  parked: { short: "parked", long: "parked (never moved)" },
+  fragment: { short: "mid-junction", long: "picked up mid-junction (tracker re-found a vehicle, would double count)" },
+  outside: { short: "no road", long: "never on a marked road" },
+};
+
+function renderNotCounted(s) {
+  if (!s.unassigned) return "";
+  const parts = Object.entries(s.not_counted || {})
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, n]) => `${n} ${NOT_COUNTED[k]?.long || k}`);
+  const detail = parts.length ? parts.join(" · ") : "";
+  const filterNote = s.skip_stationary === false ? " Parked-vehicle filter is off for this video." : "";
+  return `<span class="muted not-counted" title="These are shown in grey in the full junction view and marked in the table below.${filterNote}">
+    ${s.unassigned} not counted for a road${detail ? `: ${escapeHtml(detail)}` : ""} ⓘ</span>`;
 }
 
 function renderRoadBlock(r, duration) {
@@ -1051,6 +1068,8 @@ async function showRoadEditor(jobId, data) {
           <button class="link" id="edReset">Reset to suggestion</button>
         </div>
         <label class="ed-check"><input type="checkbox" id="edPaths" checked /> Show vehicle paths</label>
+        <label class="ed-check ed-check-top"><input type="checkbox" id="edParked" ${setup.skip_stationary === false ? "" : "checked"} />
+          <span>Don't count parked vehicles<small>Vehicles that never move during the clip. Turn off if cars wait at a red light for the whole clip.</small></span></label>
         <div class="ed-help" id="edHelp"></div>
         <button class="retry-btn primary ed-confirm" id="edConfirm">${isRedo ? "Save &amp; recount" : "Confirm roads &amp; count"}</button>
         ${isRedo ? `<a class="link" href="#/video/${jobId}">Cancel</a>` : ""}
@@ -1297,6 +1316,7 @@ async function showRoadEditor(jobId, data) {
     const btn = el("#edConfirm");
     btn.disabled = true;
     const body = {
+      skip_stationary: el("#edParked").checked,
       roads: st.roads.map((r, i) => ({
         name: r.name.trim() || `Road ${i + 1}`,
         polygon: r.pts.map(([x, y]) => [x / W, y / H]),
@@ -1363,7 +1383,7 @@ function renderVehicleTable(vehicles, roads) {
         <td>#${v.id}</td>
         <td>${vehicleIcon(v.type)}${escapeHtml(v.type)}</td>
         <td><span class="tag ${catClass}">${escapeHtml(v.category)}</span></td>
-        <td>${road ? `<span class="road-chip" style="--road:${road.color}"><i></i>${escapeHtml(shortRoadName(road.name))}</span>` : `<span class="muted">—</span>`}</td>
+        <td>${road ? `<span class="road-chip" style="--road:${road.color}"><i></i>${escapeHtml(shortRoadName(road.name))}</span>` : `<span class="muted" title="${escapeHtml(NOT_COUNTED[v.not_counted]?.long || "not counted")}">— ${escapeHtml(NOT_COUNTED[v.not_counted]?.short || "not counted")}</span>`}</td>
         <td>${fmtTime(v.t)}</td>
         <td>${(v.confidence * 100).toFixed(0)}%</td>
       </tr>`;

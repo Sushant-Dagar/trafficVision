@@ -260,6 +260,24 @@ def _vehicle_summary(tracks: dict[int, np.ndarray]) -> dict[int, dict[str, Any]]
     return out
 
 
+def _is_stationary(chunk: np.ndarray, fps: float) -> bool:
+    """True for a vehicle that sat still for its whole time on screen.
+
+    It must be visible for at least STATIONARY_MIN_SECONDS, and its ground
+    point must never stray from its usual spot by more than a fraction of its
+    box size (so detector jitter doesn't count as movement). The smaller box
+    side is used: a vehicle half out of frame has a misleadingly long box.
+    """
+    frames = chunk[:, roadgeo.COL_FRAME]
+    if (frames[-1] - frames[0]) / fps < config.STATIONARY_MIN_SECONDS:
+        return False
+    pts = roadgeo.ground_points(chunk)
+    spread = np.linalg.norm(pts - np.median(pts, axis=0), axis=1).max()
+    width = float(np.median(chunk[:, roadgeo.COL_X2] - chunk[:, roadgeo.COL_X1]))
+    height = float(np.median(chunk[:, roadgeo.COL_Y2] - chunk[:, roadgeo.COL_Y1]))
+    return spread <= max(4.0, config.STATIONARY_MOVE_FRACTION * min(width, height))
+
+
 def _crop_rect(poly: np.ndarray, w: int, h: int) -> tuple[int, int, int, int]:
     """Padded bounding box of a road outline, with even width/height."""
     pad = int(0.04 * math.hypot(w, h))
@@ -334,8 +352,18 @@ def render_job(job_id: str) -> None:
         tracks = roadgeo.group_tracks(np.load(tracks_path(job_id)))
         vehicles = _vehicle_summary(tracks)
         valid_tracks = {tid: tracks[tid] for tid in vehicles}
+
+        # Parked vehicles: never counted for a road, and left out of the
+        # "on this road now" numbers, when the filter is on for this video.
+        skip_stationary = job.get("skip_stationary", True)
+        reasons: dict[int, str] = {}
+        if skip_stationary:
+            for tid, chunk in valid_tracks.items():
+                if _is_stationary(chunk, fps):
+                    reasons[tid] = "parked"
+        moving_tracks = {tid: c for tid, c in valid_tracks.items() if tid not in reasons}
         assignment = roadgeo.assign_roads(
-            valid_tracks, road_defs, w, h, max_delay_frames=max(3, int(round(fps)))
+            moving_tracks, road_defs, w, h, max_delay_frames=max(3, int(round(fps))), reasons=reasons
         )
 
         # Per-frame lookup of the detections to draw.
@@ -380,8 +408,13 @@ def render_job(job_id: str) -> None:
         if not cap.isOpened():
             raise RuntimeError("Could not reopen the source video.")
 
+        parked_ids = np.array([t for t, r in reasons.items() if r == "parked"], dtype=np.int64)
+        moving_rows = all_rows[~np.isin(all_rows[:, roadgeo.COL_TID].astype(np.int64), parked_ids)]
+        moving_starts = np.searchsorted(
+            moving_rows[:, roadgeo.COL_FRAME].astype(np.int64), np.arange(total_frames + 2), side="left"
+        )
         presence, on_road_counts = _road_presence(
-            all_rows, starts, polys, total_frames, max(2, int(round(fps * 0.25)))
+            moving_rows, moving_starts, polys, total_frames, max(2, int(round(fps * 0.25)))
         )
 
         frame_idx = 0
@@ -414,7 +447,12 @@ def render_job(job_id: str) -> None:
                 v = vehicles[tid]
                 road = assignment.get(tid)
                 color = colors[road[0]] if road else (170, 170, 170)
-                tag = f"{v['type']} #{tid}" + (f" R{road[0] + 1}" if road else "")
+                if road:
+                    tag = f"{v['type']} #{tid} R{road[0] + 1}"
+                elif reasons.get(tid) == "parked":
+                    tag = f"parked #{tid}"
+                else:
+                    tag = f"{v['type']} #{tid}"
                 _draw_box(over, d[roadgeo.COL_X1:roadgeo.COL_Y2 + 1], tag, color)
             for i, p in enumerate(polys):
                 count = int(np.searchsorted(arrivals_by_road[i], frame_idx, side="right"))
@@ -454,8 +492,9 @@ def render_job(job_id: str) -> None:
         cap = None
 
         stats = _build_stats(
-            job_id, road_defs, vehicles, assignment, crops, w, h, fps, frame_idx, presence
+            job_id, road_defs, vehicles, assignment, crops, w, h, fps, frame_idx, presence, reasons
         )
+        stats["skip_stationary"] = skip_stationary
         with (config.OUTPUT_DIR / f"{job_id}.json").open("w", encoding="utf-8") as fh:
             json.dump(stats, fh, indent=2)
 
@@ -543,7 +582,7 @@ def _frame_time(frame_no: int, fps: float) -> float:
     return round((frame_no - 1) / fps, 3)
 
 
-def _build_stats(job_id, road_defs, vehicles, assignment, crops, w, h, fps, frames, presence) -> dict[str, Any]:
+def _build_stats(job_id, road_defs, vehicles, assignment, crops, w, h, fps, frames, presence, reasons) -> dict[str, Any]:
     import time
 
     # Changes on every render, so browsers fetch the new road videos instead of
@@ -590,6 +629,7 @@ def _build_stats(job_id, road_defs, vehicles, assignment, crops, w, h, fps, fram
         road = assignment.get(tid)
         row = {k: v[k] for k in ("id", "type", "category", "wheels", "confidence", "frames_seen")}
         row["road"] = road[0] if road else None
+        row["not_counted"] = None if road else reasons.get(tid, "outside")
         row["t"] = _frame_time(road[1] if road else v["first_frame"], fps)
         vehicle_rows.append(row)
         if road:
@@ -611,6 +651,7 @@ def _build_stats(job_id, road_defs, vehicles, assignment, crops, w, h, fps, fram
         "by_type": dict(per_type),
         "categories": dict(per_cat),
         "unassigned": sum(1 for v in vehicle_rows if v["road"] is None),
+        "not_counted": dict(Counter(v["not_counted"] for v in vehicle_rows if v["not_counted"])),
         "vehicles": vehicle_rows,
         "roads": road_stats,
         "frames": frames,

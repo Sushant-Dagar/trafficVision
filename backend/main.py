@@ -429,6 +429,7 @@ async def roads_setup(job_id: str):
         "frame_url": f"/api/videos/{job_id}/frame",
         "road_count": job.get("road_count"),
         "roads": job.get("roads") or analysis["suggested_roads"],
+        "skip_stationary": job.get("skip_stationary", True),
         "suggested_roads": analysis["suggested_roads"],
         "trajectories": analysis.get("trajectories", []),
         "colors": roadgeo.ROAD_COLORS_HEX,
@@ -440,7 +441,8 @@ async def roads_setup(job_id: str):
 async def confirm_roads(job_id: str, payload: dict):
     """Save the user's road outlines and render per-road results.
 
-    Body: {"roads": [{"name": str, "polygon": [[x, y], ...]}]} with x/y
+    Body: {"roads": [{"name": str, "polygon": [[x, y], ...]}],
+           "skip_stationary": bool (optional, default true)} with x/y
     normalised to 0..1. Works on a video waiting for roads or one that's
     already done (re-render with new outlines - no re-detection needed).
     """
@@ -456,10 +458,12 @@ async def confirm_roads(job_id: str, payload: dict):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    skip_stationary = (payload or {}).get("skip_stationary", job.get("skip_stationary", True))
     jobs.update_job(
         job_id,
         roads=cleaned,
         road_count=len(cleaned),
+        skip_stationary=bool(skip_stationary),
         stage="render",
         status="queued",
         progress=0.0,

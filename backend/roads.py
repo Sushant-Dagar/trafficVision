@@ -367,6 +367,7 @@ def assign_roads(
     w: int,
     h: int,
     max_delay_frames: int,
+    reasons: dict[int, str] | None = None,
 ) -> dict[int, tuple[int, int]]:
     """{track_id: (road_index, frame_it_was_on_that_road)} for counted vehicles.
 
@@ -381,6 +382,10 @@ def assign_roads(
 
     If outlines overlap at that moment, the road whose edge the point is
     furthest inside wins.
+
+    If ``reasons`` is given, it's filled with why each uncounted vehicle was
+    left out: "outside" (never inside any outline) or "fragment" (only
+    reached a road well after it first appeared).
     """
     import cv2
 
@@ -392,9 +397,13 @@ def assign_roads(
         inside = np.stack([points_in_polygon(pts, p) for p in polys], axis=1)
         hit_rows = np.flatnonzero(inside.any(axis=1))
         if not len(hit_rows):
+            if reasons is not None:
+                reasons[tid] = "outside"
             continue
         k = int(hit_rows[0])
         if chunk[k, COL_FRAME] - chunk[0, COL_FRAME] > max_delay_frames:
+            if reasons is not None:
+                reasons[tid] = "fragment"
             continue
         candidates = np.flatnonzero(inside[k])
         if len(candidates) == 1:
