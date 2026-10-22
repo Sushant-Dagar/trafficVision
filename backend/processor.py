@@ -260,22 +260,111 @@ def _vehicle_summary(tracks: dict[int, np.ndarray]) -> dict[int, dict[str, Any]]
     return out
 
 
-def _is_stationary(chunk: np.ndarray, fps: float) -> bool:
-    """True for a vehicle that sat still for its whole time on screen.
+def _is_still(chunk: np.ndarray, fps: float) -> bool:
+    """True if a track's ground point stays put for its whole life.
 
-    It must be visible for at least STATIONARY_MIN_SECONDS, and its ground
-    point must never stray from its usual spot by more than a fraction of its
-    box size (so detector jitter doesn't count as movement). The smaller box
-    side is used: a vehicle half out of frame has a misleadingly long box.
+    The path is smoothed with a half-second running median, so a moment where
+    something passes in front and distorts the box is ignored, and the
+    vehicle is still only if the smoothed position never leaves its starting
+    spot. A car that waits at a red light and then drives off does leave it.
+
+    The box width sets the tolerance: things in front of a parked car (bushes,
+    passing traffic) mostly hide its bottom and change the box height.
     """
-    frames = chunk[:, roadgeo.COL_FRAME]
-    if (frames[-1] - frames[0]) / fps < config.STATIONARY_MIN_SECONDS:
-        return False
     pts = roadgeo.ground_points(chunk)
-    spread = np.linalg.norm(pts - np.median(pts, axis=0), axis=1).max()
     width = float(np.median(chunk[:, roadgeo.COL_X2] - chunk[:, roadgeo.COL_X1]))
-    height = float(np.median(chunk[:, roadgeo.COL_Y2] - chunk[:, roadgeo.COL_Y1]))
-    return spread <= max(4.0, config.STATIONARY_MOVE_FRACTION * min(width, height))
+    tol = max(4.0, config.STATIONARY_MOVE_FRACTION * width)
+    win = max(3, int(round(fps * 0.5)))
+    if len(pts) <= win:
+        smooth = np.median(pts, axis=0, keepdims=True)
+        return float(np.linalg.norm(pts - smooth, axis=1).max()) <= 2 * tol
+    windows = np.lib.stride_tricks.sliding_window_view(pts, win, axis=0)  # (n, 2, win)
+    smooth = np.median(windows, axis=2)
+    return float(np.linalg.norm(smooth - smooth[0], axis=1).max()) <= tol
+
+
+def _same_spot(a, b) -> bool:
+    """Two boxes [x1, y1, x2, y2] mark the same parked vehicle.
+
+    Overlap is measured against the smaller box (a partly hidden car has a
+    smaller box that sits inside its normal one), and the boxes must be of a
+    similar size, so a big nearby car driving in front of a parked one isn't
+    mistaken for it.
+    """
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    area_a = max(1e-6, (a[2] - a[0]) * (a[3] - a[1]))
+    area_b = max(1e-6, (b[2] - b[0]) * (b[3] - b[1]))
+    ratio = max(area_a, area_b) / min(area_a, area_b)
+    return ix * iy / min(area_a, area_b) >= 0.6 and ratio <= 2.5
+
+
+def _parked_track_ids(tracks: dict[int, np.ndarray], fps: float) -> set[int]:
+    """Track ids that belong to parked vehicles.
+
+    The tracker loses a parked car every time traffic passes in front of it
+    and re-finds it under a new id, so one parked car often shows up as many
+    short, still tracks at the same spot. Those are grouped (their usual boxes
+    mostly overlap); if a group covers at least STATIONARY_MIN_SECONDS from its
+    first to its last sighting, and the spot is occupied for most of that
+    time, every id in it is parked.
+
+    A track that *starts* at a parked spot with a parked-car-sized box is that
+    parked car re-found too, even if the tracker then hands its id to a car
+    driving past in front - so it's also marked parked rather than counted as
+    a new vehicle coming from that road.
+    """
+    still = []
+    for tid, chunk in tracks.items():
+        if _is_still(chunk, fps):
+            box = np.median(chunk[:, roadgeo.COL_X1:roadgeo.COL_Y2 + 1], axis=0)
+            still.append((tid, box, chunk[0, roadgeo.COL_FRAME], chunk[-1, roadgeo.COL_FRAME]))
+
+    parent = list(range(len(still)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(len(still)):
+        for j in range(i + 1, len(still)):
+            if _same_spot(still[i][1], still[j][1]):
+                parent[find(i)] = find(j)
+
+    groups: dict[int, list[int]] = {}
+    for i in range(len(still)):
+        groups.setdefault(find(i), []).append(i)
+    parked: set[int] = set()
+    spots = []
+    for members in groups.values():
+        first = min(still[i][2] for i in members)
+        last = max(still[i][3] for i in members)
+        span = last - first + 1
+        if (span - 1) / fps < config.STATIONARY_MIN_SECONDS:
+            continue
+        # Time covered by the ids' lifetimes (an id persists through the frames
+        # where the detector briefly missed the car, e.g. behind a bush).
+        covered = np.zeros(int(span), dtype=bool)
+        for i in members:
+            covered[int(still[i][2] - first): int(still[i][3] - first) + 1] = True
+        if covered.mean() < config.STATIONARY_MIN_COVERAGE:
+            continue  # different cars flickering through a far-away spot
+        parked.update(still[i][0] for i in members)
+        spots.append(np.median(np.stack([still[i][1] for i in members]), axis=0))
+
+    # Tracks that begin as one of those parked cars (id later handed to a
+    # passing car, or a brief re-find that wasn't still long enough to group).
+    if spots:
+        head = max(3, int(round(fps * 0.3)))
+        for tid, chunk in tracks.items():
+            if tid in parked:
+                continue
+            start_box = np.median(chunk[:head, roadgeo.COL_X1:roadgeo.COL_Y2 + 1], axis=0)
+            if any(_same_spot(start_box, spot) for spot in spots):
+                parked.add(tid)
+    return parked
 
 
 def _crop_rect(poly: np.ndarray, w: int, h: int) -> tuple[int, int, int, int]:
@@ -358,9 +447,12 @@ def render_job(job_id: str) -> None:
         skip_stationary = job.get("skip_stationary", True)
         reasons: dict[int, str] = {}
         if skip_stationary:
-            for tid, chunk in valid_tracks.items():
-                if _is_stationary(chunk, fps):
-                    reasons[tid] = "parked"
+            for tid in _parked_track_ids(valid_tracks, fps):
+                reasons[tid] = "parked"
+        min_count_frames = max(config.MIN_TRACK_FRAMES, int(round(fps * config.COUNT_MIN_SECONDS)))
+        for tid, chunk in valid_tracks.items():
+            if tid not in reasons and len(chunk) < min_count_frames:
+                reasons[tid] = "brief"
         moving_tracks = {tid: c for tid, c in valid_tracks.items() if tid not in reasons}
         assignment = roadgeo.assign_roads(
             moving_tracks, road_defs, w, h, max_delay_frames=max(3, int(round(fps))), reasons=reasons
@@ -408,7 +500,8 @@ def render_job(job_id: str) -> None:
         if not cap.isOpened():
             raise RuntimeError("Could not reopen the source video.")
 
-        parked_ids = np.array([t for t, r in reasons.items() if r == "parked"], dtype=np.int64)
+        # Parked cars and sub-second flickers don't count as "on this road now" either.
+        parked_ids = np.array([t for t, r in reasons.items() if r in ("parked", "brief")], dtype=np.int64)
         moving_rows = all_rows[~np.isin(all_rows[:, roadgeo.COL_TID].astype(np.int64), parked_ids)]
         moving_starts = np.searchsorted(
             moving_rows[:, roadgeo.COL_FRAME].astype(np.int64), np.arange(total_frames + 2), side="left"
@@ -504,9 +597,9 @@ def render_job(job_id: str) -> None:
             progress=1.0,
             stage="render",
             summary={
-                "total": stats["total"],
-                "two_wheelers": stats["categories"].get("2-wheeler", 0),
-                "four_wheelers": stats["categories"].get("4-wheeler", 0),
+                "total": stats["counted"],
+                "two_wheelers": stats["counted_categories"].get("2-wheeler", 0),
+                "four_wheelers": stats["counted_categories"].get("4-wheeler", 0),
                 "roads": [
                     {"name": r["name"], "total": r["total"], "color": r["color"]}
                     for r in stats["roads"]
@@ -650,6 +743,10 @@ def _build_stats(job_id, road_defs, vehicles, assignment, crops, w, h, fps, fram
         "total": len(vehicle_rows),
         "by_type": dict(per_type),
         "categories": dict(per_cat),
+        # Vehicles counted for a road. "total" above counts every tracked id,
+        # which includes parked cars the tracker re-found under new ids.
+        "counted": sum(rs["total"] for rs in road_stats),
+        "counted_categories": dict(Counter(v["category"] for v in vehicle_rows if v["road"] is not None)),
         "unassigned": sum(1 for v in vehicle_rows if v["road"] is None),
         "not_counted": dict(Counter(v["not_counted"] for v in vehicle_rows if v["not_counted"])),
         "vehicles": vehicle_rows,

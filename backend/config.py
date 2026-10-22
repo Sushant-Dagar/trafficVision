@@ -46,14 +46,24 @@ TRACKER = "bytetrack.yaml"
 # spurious one-frame detections that would otherwise inflate the totals.
 MIN_TRACK_FRAMES = int(os.environ.get("MIN_TRACK_FRAMES", "3"))
 
-# Parked-vehicle filter: a vehicle seen for at least this many seconds whose
-# position never moves by more than a third of its own size is treated as
-# parked and isn't counted for any road. 8 s is longer than a car normally sits
-# still while queuing into view, so cars stopping at a red light near the end
-# of a clip aren't mistaken for parked ones. It can be switched off per video
-# in the road editor (e.g. a short clip where cars wait at a red light throughout).
-STATIONARY_MIN_SECONDS = float(os.environ.get("STATIONARY_MIN_SECONDS", "8.0"))
-STATIONARY_MOVE_FRACTION = float(os.environ.get("STATIONARY_MOVE_FRACTION", "0.35"))
+# Parked-vehicle filter. A vehicle is "still" if its position never moves by
+# more than this fraction of its own size. Still vehicles at the same spot are
+# treated as one parked car even when the tracker gave it several ids (it
+# loses a parked car whenever traffic drives in front of it). If that spot is
+# occupied for at least STATIONARY_MIN_SECONDS in total, all of those ids are
+# parked and none is counted for a road. Can be switched off per video in the
+# road editor (e.g. a short clip where cars wait at a red light throughout).
+STATIONARY_MIN_SECONDS = float(os.environ.get("STATIONARY_MIN_SECONDS", "2.0"))
+# ...and the spot must actually be occupied for at least this share of that
+# time. A parked car is only hidden briefly while traffic passes; distant
+# moving cars that pass the same far-away spot one after another are not.
+STATIONARY_MIN_COVERAGE = float(os.environ.get("STATIONARY_MIN_COVERAGE", "0.4"))
+
+# A vehicle has to be tracked for at least this long to be counted for a road.
+# Real traffic is visible for much longer; shorter tracks are detector noise or
+# a vehicle briefly re-found after being hidden.
+COUNT_MIN_SECONDS = float(os.environ.get("COUNT_MIN_SECONDS", "0.5"))
+STATIONARY_MOVE_FRACTION = float(os.environ.get("STATIONARY_MOVE_FRACTION", "0.5"))
 
 # Fallback FPS if the source video reports an invalid frame rate.
 DEFAULT_FPS = 25.0

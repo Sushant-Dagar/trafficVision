@@ -712,10 +712,14 @@ function showLegacyDetail(jobId, data) {
 }
 
 function renderTiles(s, extra = "") {
+  // Newer results count only vehicles assigned to a road (parked cars and
+  // tracker duplicates excluded); older ones fall back to every tracked id.
+  const counted = s.counted ?? s.total ?? 0;
+  const cats = s.counted_categories ?? s.categories ?? {};
   return `<div class="tiles">
-      <div class="tile"><div class="big">${s.total ?? 0}</div><div class="cap">Total vehicles</div></div>
-      <div class="tile two"><div class="big">${s.categories?.["2-wheeler"] ?? 0}</div><div class="cap">2-wheelers</div></div>
-      <div class="tile four"><div class="big">${s.categories?.["4-wheeler"] ?? 0}</div><div class="cap">4-wheelers</div></div>
+      <div class="tile"><div class="big">${counted}</div><div class="cap">${s.counted !== undefined ? "Vehicles counted" : "Total vehicles"}</div></div>
+      <div class="tile two"><div class="big">${cats["2-wheeler"] ?? 0}</div><div class="cap">2-wheelers</div></div>
+      <div class="tile four"><div class="big">${cats["4-wheeler"] ?? 0}</div><div class="cap">4-wheelers</div></div>
       ${extra}
     </div>`;
 }
@@ -775,7 +779,8 @@ function showRoadResults(jobId, data) {
     ${roads.map((r) => renderRoadBlock(r, duration)).join("")}
 
     <div class="panel">
-      <h3>Every vehicle detected (${s.vehicles.length})</h3>
+      <h3>Every detection (${s.vehicles.length})</h3>
+      <p class="hint" style="margin:0 0 10px;">Every id the tracker created. One real vehicle can appear more than once here, e.g. a parked car that was re-found after traffic passed in front of it; only rows with a road are counted.</p>
       <div class="lane-divider"></div>
       ${renderVehicleTable(s.vehicles, roads)}
     </div>
@@ -817,6 +822,7 @@ function showRoadResults(jobId, data) {
 
 const NOT_COUNTED = {
   parked: { short: "parked", long: "parked (never moved)" },
+  brief: { short: "too brief", long: "seen for under half a second (detector noise)" },
   fragment: { short: "mid-junction", long: "picked up mid-junction (tracker re-found a vehicle, would double count)" },
   outside: { short: "no road", long: "never on a marked road" },
 };

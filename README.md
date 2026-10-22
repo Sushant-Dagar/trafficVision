@@ -66,7 +66,19 @@ seen. This leaves out:
 - tracker fragments picked up in the middle of the junction (the tracker briefly lost
   a vehicle and re-found it with a new id) — otherwise these would be counted twice.
 
-These show up as "not counted for a road" and are boxed in grey in the overview.
+- **parked vehicles** (on by default, can be switched off per video in *Edit roads*):
+  a vehicle whose smoothed position never leaves its spot. The tracker loses a
+  parked car whenever traffic passes in front of it and re-finds it under a new id,
+  so all still ids at the same spot are treated as one car; if that spot is occupied
+  for at least 2 s (and for at least 40% of that time), every one of those ids is
+  parked. A track that *starts* at a parked car's spot is that car re-found too.
+  A car that waits at a red light and then drives off isn't parked.
+- **sub-second detections** (tracked for under 0.5 s): detector noise or a vehicle
+  briefly re-found.
+
+These show up as "not counted for a road", with the reason, and are boxed in grey in
+the overview. The "Vehicles counted" tile only includes vehicles counted for a road.
+The thresholds are in `backend/config.py` (`STATIONARY_*`, `COUNT_MIN_SECONDS`).
 
 ---
 
