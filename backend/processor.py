@@ -30,7 +30,7 @@ from typing import Any
 
 import numpy as np
 
-from . import config, jobs, roads as roadgeo
+from . import config, jobs, roads as roadgeo, traffic
 
 _MODEL = None
 
@@ -509,6 +509,8 @@ def render_job(job_id: str) -> None:
         presence, on_road_counts = _road_presence(
             moving_rows, moving_starts, polys, total_frames, max(2, int(round(fps * 0.25)))
         )
+        # Turning movements, queues, waiting times, flow and PCU.
+        engineering = traffic.analyse(moving_tracks, vehicles, assignment, polys, fps, total_frames)
 
         frame_idx = 0
         while True:
@@ -585,7 +587,8 @@ def render_job(job_id: str) -> None:
         cap = None
 
         stats = _build_stats(
-            job_id, road_defs, vehicles, assignment, crops, w, h, fps, frame_idx, presence, reasons
+            job_id, road_defs, vehicles, assignment, crops, w, h, fps, frame_idx, presence, reasons,
+            engineering,
         )
         stats["skip_stationary"] = skip_stationary
         with (config.OUTPUT_DIR / f"{job_id}.json").open("w", encoding="utf-8") as fh:
@@ -675,7 +678,9 @@ def _frame_time(frame_no: int, fps: float) -> float:
     return round((frame_no - 1) / fps, 3)
 
 
-def _build_stats(job_id, road_defs, vehicles, assignment, crops, w, h, fps, frames, presence, reasons) -> dict[str, Any]:
+def _build_stats(
+    job_id, road_defs, vehicles, assignment, crops, w, h, fps, frames, presence, reasons, engineering
+) -> dict[str, Any]:
     import time
 
     # Changes on every render, so browsers fetch the new road videos instead of
@@ -723,6 +728,13 @@ def _build_stats(job_id, road_defs, vehicles, assignment, crops, w, h, fps, fram
         row = {k: v[k] for k in ("id", "type", "category", "wheels", "confidence", "frames_seen")}
         row["road"] = road[0] if road else None
         row["not_counted"] = None if road else reasons.get(tid, "outside")
+        eng = engineering["vehicles"].get(tid)
+        row["to"] = eng["to"] if eng else None
+        row["turn"] = eng["turn"] if eng else None
+        row["exit_basis"] = eng["exit_basis"] if eng else None
+        row["wait"] = eng["wait"] if eng else None
+        row["wait_partial"] = eng["wait_partial"] if eng else False
+        row["pcu"] = engineering["pcu_factors"].get(v["type"], 1.0) if road else None
         row["t"] = _frame_time(road[1] if road else v["first_frame"], fps)
         vehicle_rows.append(row)
         if road:
@@ -731,9 +743,21 @@ def _build_stats(job_id, road_defs, vehicles, assignment, crops, w, h, fps, fram
             rs["by_type"][v["type"]] += 1
             rs["categories"][v["category"]] += 1
             rs["events"].append(
-                {"t": row["t"], "id": v["id"], "type": v["type"], "category": v["category"]}
+                {
+                    "t": row["t"],
+                    "id": v["id"],
+                    "type": v["type"],
+                    "category": v["category"],
+                    "to": row["to"],
+                    "turn": row["turn"],
+                    "exit_basis": row["exit_basis"],
+                    "wait": row["wait"],
+                    "wait_partial": row["wait_partial"],
+                }
             )
 
+    for rs, eng in zip(road_stats, engineering["roads"]):
+        rs.update(eng)
     for rs in road_stats:
         rs["by_type"] = dict(rs["by_type"])
         rs["categories"] = dict(rs["categories"])
@@ -756,4 +780,9 @@ def _build_stats(job_id, road_defs, vehicles, assignment, crops, w, h, fps, fram
         "duration": round(frames / fps, 2) if fps else 0,
         "resolution": f"{w}x{h}",
         "version": version,
+        "turning": engineering["turning"],
+        "pcu_factors": engineering["pcu_factors"],
+        "flow_vph": round(sum(rs["total"] for rs in road_stats) / engineering["duration_h"]),
+        "pcu": round(sum(r["pcu"] for r in engineering["roads"]), 1),
+        "pcu_ph": round(sum(r["pcu"] for r in engineering["roads"]) / engineering["duration_h"]),
     }

@@ -65,6 +65,48 @@ STATIONARY_MIN_COVERAGE = float(os.environ.get("STATIONARY_MIN_COVERAGE", "0.4")
 COUNT_MIN_SECONDS = float(os.environ.get("COUNT_MIN_SECONDS", "0.5"))
 STATIONARY_MOVE_FRACTION = float(os.environ.get("STATIONARY_MOVE_FRACTION", "0.5"))
 
+# ---------------------------------------------------------------------------
+# Traffic-engineering numbers (backend/traffic.py)
+# ---------------------------------------------------------------------------
+# A vehicle moving slower than this many of its own widths per second counts
+# as stopped (about walking pace for a car seen side-on).
+STOP_SPEED = float(os.environ.get("STOP_SPEED", "0.2"))
+
+# Vehicles that stood still for less than this on their approach road (rolled
+# through, or a brief pause) aren't included in the average wait.
+MIN_WAIT_SECONDS = float(os.environ.get("MIN_WAIT_SECONDS", "1.0"))
+
+# A vehicle must be seen on a road for at least this many detections for it
+# to count as the road it left by.
+EXIT_MIN_FRAMES = int(os.environ.get("EXIT_MIN_FRAMES", "3"))
+
+# A track that starts within this many seconds after another ends, within this
+# many vehicle widths of where the lost one was heading, is the same vehicle
+# re-found by the tracker (used to follow a vehicle to the road it leaves by).
+LINK_MAX_SECONDS = float(os.environ.get("LINK_MAX_SECONDS", "1.0"))
+LINK_MAX_WIDTHS = float(os.environ.get("LINK_MAX_WIDTHS", "1.5"))
+
+# A vehicle that disappears (behind a building, a bus...) before reaching any
+# road is given the road it was heading for, if one is within this angle of
+# its direction of travel. Shown as an estimate.
+HEADING_MAX_DEG = float(os.environ.get("HEADING_MAX_DEG", "30"))
+
+# For junctions other than 4-way, an exit within this many degrees of directly
+# opposite the approach road is "straight on".
+STRAIGHT_TOLERANCE_DEG = float(os.environ.get("STRAIGHT_TOLERANCE_DEG", "40"))
+
+# Passenger Car Units, IRC:106-1990 (urban roads). Two values per type: when
+# that type is 5% of traffic, and when it's 10% or more (interpolated in
+# between). YOLO's "truck" also covers pickups/LCVs (IRC 1.4-2.0), so trucks
+# are slightly over-weighted when most of them are small.
+PCU_IRC106: dict[str, tuple[float, float]] = {
+    "car": (1.0, 1.0),
+    "motorcycle": (0.5, 0.75),
+    "bicycle": (0.4, 0.5),
+    "bus": (2.2, 3.7),
+    "truck": (2.2, 3.7),
+}
+
 # Fallback FPS if the source video reports an invalid frame rate.
 DEFAULT_FPS = 25.0
 

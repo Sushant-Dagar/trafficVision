@@ -15,10 +15,10 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import config, downloader, jobs, processor, roads as roadgeo, trimmer
+from . import config, downloader, export, jobs, processor, roads as roadgeo, trimmer
 
 # ---------------------------------------------------------------------------
 # Background worker
@@ -397,6 +397,57 @@ async def get_road_video(job_id: str, index: int):
         raise HTTPException(status_code=404, detail="Road video not ready")
     return FileResponse(
         str(path), media_type="video/mp4", filename=f"{job_id}_road{index + 1}.mp4", headers=NO_CACHE
+    )
+
+
+def _load_done_stats(job_id: str) -> tuple[dict, dict]:
+    import json
+
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    path = config.OUTPUT_DIR / f"{job_id}.json"
+    if job["status"] != "done" or not path.exists():
+        raise HTTPException(status_code=409, detail="This video hasn't finished processing yet.")
+    with path.open("r", encoding="utf-8") as fh:
+        stats = json.load(fh)
+    if not stats.get("roads"):
+        raise HTTPException(status_code=409, detail="Set up roads for this video first.")
+    return job, stats
+
+
+def _download_name(job: dict, suffix: str) -> str:
+    import re
+
+    stem = Path(job.get("original_name") or "video").stem
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("_")[:60] or "video"
+    return f"{stem}{suffix}"
+
+
+@app.get("/api/videos/{job_id}/export.xlsx")
+async def export_xlsx(job_id: str):
+    """Excel workbook: summary per road, turning movements, every vehicle,
+    queue over time, and how the numbers were worked out."""
+    job, stats = _load_done_stats(job_id)
+    data = export.workbook(stats, job.get("original_name") or "video")
+    return Response(
+        data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{_download_name(job, "_traffic.xlsx")}"'},
+    )
+
+
+@app.get("/api/videos/{job_id}/export/{kind}.csv")
+async def export_csv(job_id: str, kind: str):
+    """CSV of the per-road summary (kind=roads) or every vehicle (kind=vehicles)."""
+    if kind not in ("roads", "vehicles"):
+        raise HTTPException(status_code=404, detail="Unknown export")
+    job, stats = _load_done_stats(job_id)
+    data = export.roads_csv(stats) if kind == "roads" else export.vehicles_csv(stats)
+    return Response(
+        data,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{_download_name(job, f"_{kind}.csv")}"'},
     )
 
 

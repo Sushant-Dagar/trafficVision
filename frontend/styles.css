@@ -709,3 +709,84 @@ a.retry-btn { text-decoration: none; }
 .ed-check-top input { margin-top: 3px; }
 .ed-check small { display: block; color: var(--paint-faint); font-size: 11.5px; margin-top: 2px; line-height: 1.4; }
 .not-counted { flex-basis: 100%; }
+
+/* =====================================================================
+ * Junction summary, turning movements, queues, exports
+ * ===================================================================== */
+.detail-toolbar .retry-btn svg { width: 14px; height: 14px; }
+.print-only { display: none; }
+
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.junction-summary .hint { margin: 10px 0 0; line-height: 1.5; }
+.junction-summary h3 { font-size: 15px; }
+.eng-table td, .eng-table th, .tm-table td, .tm-table th { padding: 8px 10px; white-space: nowrap; }
+.eng-table tfoot th, .eng-table tfoot td { border-top: 2px solid var(--line); border-bottom: none; color: var(--paint); font-size: 12px; }
+.eng-table tbody tr:hover, .tm-table tbody tr:hover { background: transparent; }
+
+.tm-table { width: auto; min-width: 100%; }
+.tm-table th.tm-from { font-family: var(--font-body); text-transform: none; letter-spacing: 0; font-weight: 500; }
+.th-swatch { display: inline-block; width: 8px; height: 8px; border-radius: 2px; background: var(--road); margin-right: 6px; vertical-align: 0; }
+.tm-cell { background: color-mix(in srgb, var(--yellow) 8%, transparent); }
+.tm-cell b { font-family: var(--font-display); font-size: 17px; font-weight: 600; }
+.tm-cell sup { color: var(--paint-dim); font-size: 10px; margin-left: 2px; }
+.tm-turn { display: block; font-size: 11px; color: var(--paint-dim); margin-top: 1px; }
+.tm-zero { color: var(--paint-faint); }
+
+.eng-line {
+  display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; color: var(--paint-dim);
+  padding: 8px 10px; background: var(--asphalt); border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.eng-line b { color: var(--paint); font-variant-numeric: tabular-nums; }
+.left-by { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.left-by .road-chip sup { color: var(--paint-dim); }
+.left-unseen { font-size: 12px; }
+
+.event { flex-wrap: wrap; }
+.event-sub { flex-basis: 100%; padding-left: 44px; font-size: 11.5px; color: var(--paint-faint); margin-top: 2px; }
+.event.past .event-sub { color: var(--paint-dim); }
+.event-sub .est { font-style: italic; }
+
+.tl-tabs { display: inline-flex; gap: 4px; }
+.tl-tab {
+  background: none; border: 1px solid transparent; color: var(--paint-dim); cursor: pointer;
+  font: inherit; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+}
+.tl-tab.on { color: var(--paint); border-color: var(--line); background: var(--asphalt-3); }
+.tl-tab:hover:not(.on) { color: var(--paint); }
+.q-area { fill: var(--road); opacity: 0.15; }
+
+/* ---------- Print / Save as PDF ---------- */
+@media print {
+  :root {
+    --asphalt: #ffffff; --asphalt-2: #ffffff; --asphalt-3: #f2f2f2; --line: #cfcfcf;
+    --paint: #111111; --paint-dim: #444444; --paint-faint: #777777;
+  }
+  html { color-scheme: light; }
+  body { background: #fff; color: #111; font-size: 11px; }
+  @page { margin: 14mm 12mm; }
+  .topbar, .traffic-strip, .back, .footer, .toasts, .no-print, video, .video-wrap { display: none !important; }
+  .print-only { display: block; }
+  .print-meta { color: #555; margin: -10px 0 12px; font-size: 11px; }
+  main { padding: 0 !important; max-width: none !important; }
+  .tile, .panel, .road-block, .timeline, .eng-line, .type-pill { box-shadow: none; }
+  .tiles { grid-template-columns: repeat(4, 1fr); margin: 10px 0; }
+  .tile { padding: 10px; }
+  .tile .big { font-size: 22px; }
+  .road-block { break-inside: avoid; padding: 12px; margin-top: 12px; }
+  .road-grid { grid-template-columns: 1fr; }
+  .junction-summary { break-inside: avoid; }
+  .tm-cell { background: #fff6dc; }
+  .tl-graph { height: 90px; }
+  .tl-tabs .tl-tab:not(.on) { display: none; }
+  .vehicles-panel { break-before: page; }
+  .vehicles-panel .hint { display: none; }
+  table { font-size: 10.5px; }
+  th, td { padding: 5px 6px; }
+  .road-chip { border-color: #ccc; }
+  h3 .print-only { display: inline; }
+  tr.uncounted { display: none; }
+  .tag.two  { background: #fff3cf; color: #7a5500; }
+  .tag.four { background: #e3eef8; color: #1d4f7a; }
+  .vehicles-panel { break-before: auto; }
+  a { color: inherit; text-decoration: none; }
+}

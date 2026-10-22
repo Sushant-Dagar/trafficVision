@@ -750,12 +750,19 @@ function shortRoadName(name) {
 function showRoadResults(jobId, data) {
   const s = data.stats;
   const roads = s.roads;
+  window.__roads = roads;
   const duration = s.duration || (s.frames && s.fps ? s.frames / s.fps : 0);
 
   detail.innerHTML = `
     <h2 class="detail-title">${escapeHtml(data.original_name)}</h2>
-    <div class="detail-toolbar">
+    <p class="print-only print-meta">Junction traffic survey · ${roads.length} roads · ${fmtTime(duration)} of footage · generated ${escapeHtml(new Date().toLocaleString())}</p>
+    <div class="detail-toolbar no-print">
       <a class="retry-btn" href="#/video/${jobId}/roads">Edit roads</a>
+      ${s.turning ? `
+      <a class="retry-btn" href="/api/videos/${jobId}/export.xlsx" download>${ICON_DOWNLOAD} Excel</a>
+      <a class="retry-btn" href="/api/videos/${jobId}/export/roads.csv" download title="One row per road">${ICON_DOWNLOAD} Roads CSV</a>
+      <a class="retry-btn" href="/api/videos/${jobId}/export/vehicles.csv" download title="One row per vehicle">${ICON_DOWNLOAD} Vehicles CSV</a>
+      <button class="retry-btn" id="printBtn" title="Print, or choose 'Save as PDF' as the printer">${ICON_PRINT} Report / PDF</button>` : ""}
       <span class="muted">${roads.length} road${roads.length === 1 ? "" : "s"} · ${fmtTime(duration)} of footage</span>
     </div>
 
@@ -771,15 +778,19 @@ function showRoadResults(jobId, data) {
       ${renderNotCounted(s)}
     </div>
 
-    <details class="panel overview-panel">
+    ${s.turning ? renderJunctionSummary(s, jobId) : `<div class="notice no-print" style="margin-bottom:16px;">
+      Turning movements, queues, waiting times and PCU are new.
+      <a href="#/video/${jobId}/roads">Edit roads → Save &amp; recount</a> to add them for this video (no re-detection needed).</div>`}
+
+    <details class="panel overview-panel no-print">
       <summary>Full junction view</summary>
       <div class="video-wrap"><video src="${data.video_url}" controls playsinline preload="none"></video></div>
     </details>
 
     ${roads.map((r) => renderRoadBlock(r, duration)).join("")}
 
-    <div class="panel">
-      <h3>Every detection (${s.vehicles.length})</h3>
+    <div class="panel vehicles-panel">
+      <h3><span class="no-print">Every detection (${s.vehicles.length})</span><span class="print-only">Counted vehicles (${s.counted ?? s.vehicles.filter((v) => v.road !== null && v.road !== undefined).length})</span></h3>
       <p class="hint" style="margin:0 0 10px;">Every id the tracker created. One real vehicle can appear more than once here, e.g. a parked car that was re-found after traffic passed in front of it; only rows with a road are counted.</p>
       <div class="lane-divider"></div>
       ${renderVehicleTable(s.vehicles, roads)}
@@ -791,7 +802,7 @@ function showRoadResults(jobId, data) {
       <div><span class="v">${escapeHtml(s.resolution ?? "?")}</span><span class="k">Resolution</span></div>
     </div>
 
-    <div class="panel">
+    <div class="panel no-print">
       <h3>Trim this video</h3>
       <div class="lane-divider"></div>
       <p class="hint" style="margin:0 0 10px;">Cut the source clip down to a shorter window and re-run detection on just that part. Your road outlines are kept.</p>
@@ -802,7 +813,7 @@ function showRoadResults(jobId, data) {
       </div>
     </div>
 
-    <div class="card-actions" style="margin-top:18px;">
+    <div class="card-actions no-print" style="margin-top:18px;">
       <button class="retry-btn" id="detailReprocessBtn">${ICON_RETRY} Re-detect vehicles</button>
       <button class="link danger" id="detailRemoveBtn">Remove this video</button>
     </div>
@@ -814,10 +825,110 @@ function showRoadResults(jobId, data) {
       retryJob(jobId);
   });
   el("#trimBtn").addEventListener("click", () => trimJob(jobId));
+  el("#printBtn")?.addEventListener("click", () => window.print());
   detail.querySelectorAll("[data-jump]").forEach((b) =>
     b.addEventListener("click", () => el(`#road-${b.dataset.jump}`).scrollIntoView({ behavior: "smooth", block: "start" }))
   );
   roads.forEach((r) => wireRoadBlock(r, duration));
+}
+
+const ICON_DOWNLOAD = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>`;
+const ICON_PRINT = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 9V3h10v6M7 17H4v-7h16v7h-3M7 14h10v7H7z"/></svg>`;
+
+const TURN_ICON = { left: "↰", straight: "↑", right: "↱", "U-turn": "↶" };
+const EXIT_BASIS = {
+  seen: "seen on its exit road",
+  linked: "seen on its exit road after the tracker re-found it",
+  direction: "estimated: it disappeared mid-junction heading for this road",
+};
+
+function fmtSec(x) {
+  if (x === null || x === undefined) return "–";
+  return x >= 60 ? fmtTime(x) : `${Math.round(x)} s`;
+}
+
+function turnText(turn) {
+  return turn ? `${TURN_ICON[turn] || ""} ${turn}` : "";
+}
+
+/** Per-road engineering table + turning-movement matrix. */
+function renderJunctionSummary(s, jobId) {
+  const roads = s.roads;
+  const tm = s.turning;
+  const short = roads.map((r) => escapeHtml(shortRoadName(r.name)));
+  const sumRow = (key) => roads.reduce((a, r) => a + (r[key] || 0), 0);
+
+  const engRows = roads
+    .map(
+      (r) => `<tr>
+        <td><span class="road-chip" style="--road:${r.color}"><i></i>${escapeHtml(r.name)}</span></td>
+        <td class="num">${r.total}</td>
+        <td class="num">${r.flow_vph}</td>
+        <td class="num">${r.pcu}</td>
+        <td class="num">${r.pcu_ph}</td>
+        <td class="num">${r.stopped_count ? fmtSec(r.avg_wait) : "–"}</td>
+        <td class="num">${r.max_wait ? fmtSec(r.max_wait) : "–"}</td>
+        <td class="num">${r.queue.max}</td>
+        <td class="num">${r.queue.avg}</td>
+      </tr>`
+    )
+    .join("");
+
+  const n = roads.length;
+  const head = short.map((nm, j) => `<th class="num" style="--road:${roads[j].color}"><i class="th-swatch"></i>${nm}</th>`).join("");
+  const body = roads
+    .map((r, i) => {
+      const cells = roads
+        .map((_, j) => {
+          const c = tm.matrix[i][j];
+          const est = tm.estimated?.[i]?.[j] || 0;
+          const label = tm.labels[i][j];
+          if (!c) return `<td class="num tm-zero" title="${escapeHtml(r.name)} → ${escapeHtml(roads[j].name)}: ${label}">${i === j ? "" : "0"}</td>`;
+          return `<td class="num tm-cell" title="${escapeHtml(r.name)} → ${escapeHtml(roads[j].name)}: ${label}${est ? ` (${est} estimated from direction of travel)` : ""}">
+            <b>${c}</b><span class="tm-turn">${TURN_ICON[label] || ""} ${label}${est ? ` · ${est} est.` : ""}</span></td>`;
+        })
+        .join("");
+      const total = tm.matrix[i].reduce((a, b) => a + b, 0) + tm.not_seen_leaving[i];
+      return `<tr><th class="tm-from"><span class="road-chip" style="--road:${r.color}"><i></i>${short[i]}</span></th>${cells}
+        <td class="num tm-zero">${tm.not_seen_leaving[i]}</td><td class="num"><b>${total}</b></td></tr>`;
+    })
+    .join("");
+  const nEst = (tm.estimated || []).flat().reduce((a, b) => a + b, 0);
+  const nUnseen = tm.not_seen_leaving.reduce((a, b) => a + b, 0);
+
+  return `
+    <section class="panel junction-summary">
+      <h3>Junction summary</h3>
+      <div class="lane-divider"></div>
+      <div class="table-scroll"><table class="eng-table">
+        <thead><tr>
+          <th>Road</th>
+          <th class="num" title="Vehicles that came from this road">Counted</th>
+          <th class="num" title="Counted vehicles scaled to one hour">Veh/h</th>
+          <th class="num" title="Passenger car units, IRC:106-1990">PCU</th>
+          <th class="num" title="PCU scaled to one hour">PCU/h</th>
+          <th class="num" title="Average time stopped on this road, for vehicles that stopped for 1 s or more">Avg wait</th>
+          <th class="num" title="Longest time a vehicle from this road stood still">Max wait</th>
+          <th class="num" title="Most vehicles stopped on this road at once">Max queue</th>
+          <th class="num" title="Vehicles stopped on this road, averaged over the clip">Avg queue</th>
+        </tr></thead>
+        <tbody>${engRows}</tbody>
+        <tfoot><tr><th>All roads</th><th class="num">${sumRow("total")}</th><th class="num">${s.flow_vph}</th>
+          <th class="num">${s.pcu}</th><th class="num">${s.pcu_ph}</th><td></td><td></td><td></td><td></td></tr></tfoot>
+      </table></div>
+      <p class="hint">Veh/h and PCU/h scale this ${fmtTime(s.duration)} clip to an hour, so treat them as rough for short clips.
+        PCU per IRC:106-1990: ${Object.entries(s.pcu_factors || {}).map(([t, f]) => `${escapeHtml(t)} ${f}`).join(" · ")}.</p>
+
+      <h3 style="margin-top:22px;">Turning movements</h3>
+      <div class="lane-divider"></div>
+      <div class="table-scroll"><table class="tm-table">
+        <thead><tr><th>From ↓ · To →</th>${head}<th class="num" title="Left the camera's view before reaching another road">Exit not seen</th><th class="num">Total</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table></div>
+      <p class="hint">Left / straight / right are from the driver's point of view.
+        ${nEst ? `<b>${nEst}</b> movement${nEst === 1 ? " was" : "s were"} estimated from the direction the vehicle was heading when it disappeared (e.g. behind a building). ` : ""}
+        ${nUnseen ? `${nUnseen} vehicle${nUnseen === 1 ? "" : "s"} left view before reaching another road, or hadn't left by the end of the clip.` : ""}</p>
+    </section>`;
 }
 
 const NOT_COUNTED = {
@@ -850,15 +961,50 @@ function renderRoadBlock(r, duration) {
         )
         .join("")
     : `<p class="muted">No vehicles came from this road.</p>`;
+  const roadsAll = window.__roads || [];
   const events = r.events.length
     ? r.events
-        .map(
-          (e, i) => `<button class="event" data-i="${i}" data-t="${e.t}">
+        .map((e, i) => {
+          const to = e.to !== null && e.to !== undefined ? roadsAll[e.to] : null;
+          const sub = [];
+          if (to) sub.push(`<span class="${e.exit_basis === "direction" ? "est" : ""}" title="${escapeHtml(EXIT_BASIS[e.exit_basis] || "")}">→ ${escapeHtml(shortRoadName(to.name))} ${TURN_ICON[e.turn] || ""}${e.exit_basis === "direction" ? "~" : ""}</span>`);
+          if (e.wait >= 1) sub.push(`<span title="${e.wait_partial ? "Already waiting when the clip started, or still waiting when it ended - the real wait was longer" : "Time stopped on this road"}">waited ${fmtSec(e.wait)}${e.wait_partial ? "+" : ""}</span>`);
+          return `<button class="event" data-i="${i}" data-t="${e.t}">
             <span class="event-t">${fmtTime(e.t)}</span>${vehicleIcon(e.type)}
-            <span class="event-type">${escapeHtml(e.type)}</span><span class="event-id">#${e.id}</span></button>`
-        )
+            <span class="event-type">${escapeHtml(e.type)}</span>
+            <span class="event-id">#${e.id}</span>
+            ${sub.length ? `<span class="event-sub">${sub.join(" · ")}</span>` : ""}</button>`;
+        })
         .join("")
     : `<p class="muted" style="padding:10px;">Nothing to list.</p>`;
+  const hasEng = !!r.queue;
+  const leftBy = hasEng
+    ? Object.entries(
+        r.events.reduce((acc, e) => {
+          if (e.to === null || e.to === undefined) return acc;
+          const k = e.to;
+          acc[k] = acc[k] || { n: 0, est: 0, turn: e.turn };
+          acc[k].n++;
+          if (e.exit_basis === "direction") acc[k].est++;
+          return acc;
+        }, {})
+      )
+        .sort((a, b) => b[1].n - a[1].n)
+        .map(([k, v]) => {
+          const to = roadsAll[k];
+          return `<span class="road-chip" style="--road:${to.color}" title="${v.est ? `${v.est} estimated from direction of travel` : ""}">
+            <i></i>${TURN_ICON[v.turn] || ""} ${escapeHtml(v.turn)} → ${escapeHtml(shortRoadName(to.name))} <b>${v.n}</b>${v.est ? "<sup>~</sup>" : ""}</span>`;
+        })
+        .join("") + (r.not_seen_leaving ? `<span class="muted left-unseen">${r.not_seen_leaving} exit not seen</span>` : "")
+    : "";
+  const engLine = hasEng
+    ? `<div class="eng-line">
+        <span><b>${r.flow_vph}</b> veh/h</span>
+        <span><b>${r.pcu}</b> PCU · <b>${r.pcu_ph}</b>/h</span>
+        <span title="Average for the ${r.stopped_count} vehicle(s) that stopped for 1 s or more">avg wait <b>${r.stopped_count ? fmtSec(r.avg_wait) : "–"}</b></span>
+        <span>max queue <b>${r.queue.max}</b></span>
+      </div>`
+    : "";
   return `
     <section class="road-block" id="road-${r.index}" style="--road:${r.color}">
       <header class="road-head">
@@ -871,7 +1017,9 @@ function renderRoadBlock(r, duration) {
         <div class="road-side">
           <div class="side-label">Came from this road (whole video)</div>
           <div class="type-pills">${pills}</div>
-          <div class="now-box">
+          ${engLine}
+          ${leftBy ? `<div class="side-label">Where they went</div><div class="left-by">${leftBy}</div>` : ""}
+          <div class="now-box no-print">
             <div class="now-head">
               <span>On this road at <b data-now-t>0:00</b></span>
               <span class="now-total"><b data-now-n>0</b> vehicle<span data-now-s>s</span></span>
@@ -879,10 +1027,18 @@ function renderRoadBlock(r, duration) {
             <div class="now-types" data-now-types></div>
           </div>
           <div class="timeline">
-            <div class="timeline-head"><span>Counted over time</span><span class="muted" data-now>0:00 · 0 counted so far</span></div>
-            ${renderTimelineGraph(r, duration, types)}
+            <div class="timeline-head">
+              ${hasEng
+                ? `<span class="tl-tabs" role="tablist">
+                    <button class="tl-tab on" data-tab="count" role="tab" aria-selected="true">Counted over time</button>
+                    <button class="tl-tab" data-tab="queue" role="tab" aria-selected="false">Queue</button></span>`
+                : `<span>Counted over time</span>`}
+              <span class="muted" data-now>0:00 · 0 counted so far</span>
+            </div>
+            <div data-pane="count">${renderTimelineGraph(r, duration, types)}</div>
+            ${hasEng ? `<div data-pane="queue" hidden>${renderQueueGraph(r, duration)}</div>` : ""}
           </div>
-          <div class="event-list" data-events>${events}</div>
+          <div class="event-list no-print" data-events>${events}</div>
         </div>
       </div>
     </section>`;
@@ -929,12 +1085,52 @@ function renderTimelineGraph(r, duration, types) {
     ${legend}`;
 }
 
+/** Step graph of how many vehicles are stopped on the road over time. */
+function renderQueueGraph(r, duration) {
+  const W = 400, H = 130, padL = 26, padR = 8, padT = 8, padB = 18;
+  const dur = Math.max(duration, 0.1);
+  const q = r.queue;
+  const maxY = Math.max(1, q.max);
+  const x = (t) => padL + (Math.min(t, dur) / dur) * (W - padL - padR);
+  const y = (n) => padT + (1 - n / maxY) * (H - padT - padB);
+  let d = `M${x(0)},${y(q.values[0] || 0)}`;
+  q.values.forEach((v, k) => {
+    d += ` H${x(k * q.step).toFixed(1)} V${y(v).toFixed(1)}`;
+  });
+  d += ` H${x(dur)}`;
+  const area = `${d} V${y(0)} H${x(0)} Z`;
+  const ticks = [0, 0.5, 1].map((f) => `<text x="${x(dur * f)}" y="${H - 4}" text-anchor="${f === 0 ? "start" : f === 1 ? "end" : "middle"}">${fmtTime(dur * f)}</text>`).join("");
+  return `
+    <svg class="tl-graph" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" data-graph data-dur="${dur}" data-padl="${padL}" data-padr="${padR}" data-w="${W}">
+      <line x1="${padL}" y1="${y(0)}" x2="${W - padR}" y2="${y(0)}" class="tl-axis"/>
+      <line x1="${padL}" y1="${y(maxY)}" x2="${W - padR}" y2="${y(maxY)}" class="tl-grid"/>
+      <text x="${padL - 4}" y="${y(maxY) + 4}" text-anchor="end">${maxY}</text>
+      <text x="${padL - 4}" y="${y(0) + 4}" text-anchor="end">0</text>
+      ${ticks}
+      <path d="${area}" class="q-area"/>
+      <path d="${d}" class="tl-all"/>
+      <line class="tl-playhead" data-playhead x1="${padL}" x2="${padL}" y1="${padT}" y2="${y(0)}"/>
+    </svg>
+    <div class="tl-legend"><span>Vehicles stopped on this road · avg ${q.avg} · max ${q.max}</span><span data-q-now></span></div>`;
+}
+
 /** Keep the graph playhead, "so far" counter and event list in sync with the road's video. */
 function wireRoadBlock(r, duration) {
   const block = el(`#road-${r.index}`);
   const video = block.querySelector("video");
   const graph = block.querySelector("[data-graph]");
-  const playhead = block.querySelector("[data-playhead]");
+  const graphs = [...block.querySelectorAll("[data-graph]")];
+  const playheads = [...block.querySelectorAll("[data-playhead]")];
+  const qNow = block.querySelector("[data-q-now]");
+  block.querySelectorAll(".tl-tab").forEach((tab) =>
+    tab.addEventListener("click", () => {
+      block.querySelectorAll(".tl-tab").forEach((t) => {
+        t.classList.toggle("on", t === tab);
+        t.setAttribute("aria-selected", t === tab ? "true" : "false");
+      });
+      block.querySelectorAll("[data-pane]").forEach((p) => (p.hidden = p.dataset.pane !== tab.dataset.tab));
+    })
+  );
   const nowLbl = block.querySelector("[data-now]");
   const list = block.querySelector("[data-events]");
   const buttons = [...list.querySelectorAll(".event")];
@@ -979,8 +1175,14 @@ function wireRoadBlock(r, duration) {
   const sync = () => {
     const t = video.currentTime || 0;
     const px = padL + (Math.min(t, dur) / dur) * (W - padL - padR);
-    playhead.setAttribute("x1", px);
-    playhead.setAttribute("x2", px);
+    playheads.forEach((ph) => {
+      ph.setAttribute("x1", px);
+      ph.setAttribute("x2", px);
+    });
+    if (qNow && r.queue) {
+      const k = Math.min(r.queue.values.length - 1, Math.floor(t / r.queue.step));
+      qNow.textContent = `${r.queue.values[k] ?? 0} stopped now`;
+    }
     let passed = -1;
     while (passed + 1 < r.events.length && r.events[passed + 1].t <= t) passed++;
     nowLbl.textContent = `${fmtTime(t)} · ${passed + 1} counted so far`;
@@ -1020,11 +1222,13 @@ function wireRoadBlock(r, duration) {
     video.play().catch(() => {});
   };
   buttons.forEach((b) => b.addEventListener("click", () => seekTo(parseFloat(b.dataset.t) - 1)));
-  graph.addEventListener("click", (e) => {
-    const rect = graph.getBoundingClientRect();
-    const fx = ((e.clientX - rect.left) / rect.width) * W;
-    seekTo(((fx - padL) / (W - padL - padR)) * dur);
-  });
+  graphs.forEach((g) =>
+    g.addEventListener("click", (e) => {
+      const rect = g.getBoundingClientRect();
+      const fx = ((e.clientX - rect.left) / rect.width) * W;
+      seekTo(((fx - padL) / (W - padL - padR)) * dur);
+    })
+  );
   sync();
 }
 
@@ -1373,11 +1577,6 @@ function vehicleIcon(type) {
   return svg ? `<span class="v-icon">${svg}</span>` : "";
 }
 
-function vehicleIcon(type) {
-  const svg = VEHICLE_ICON[type];
-  return svg ? `<span class="v-icon">${svg}</span>` : "";
-}
-
 function renderVehicleTable(vehicles, roads) {
   if (!vehicles.length) return `<p class="muted">No vehicles detected.</p>`;
   const rows = [...vehicles]
@@ -1385,18 +1584,21 @@ function renderVehicleTable(vehicles, roads) {
     .map((v) => {
       const catClass = v.category === "2-wheeler" ? "two" : "four";
       const road = v.road !== null && v.road !== undefined ? roads[v.road] : null;
-      return `<tr>
+      return `<tr class="${road ? "" : "uncounted"}">
         <td>#${v.id}</td>
         <td>${vehicleIcon(v.type)}${escapeHtml(v.type)}</td>
         <td><span class="tag ${catClass}">${escapeHtml(v.category)}</span></td>
         <td>${road ? `<span class="road-chip" style="--road:${road.color}"><i></i>${escapeHtml(shortRoadName(road.name))}</span>` : `<span class="muted" title="${escapeHtml(NOT_COUNTED[v.not_counted]?.long || "not counted")}">— ${escapeHtml(NOT_COUNTED[v.not_counted]?.short || "not counted")}</span>`}</td>
+        <td>${v.to !== null && v.to !== undefined ? `<span class="road-chip" style="--road:${roads[v.to].color}" title="${escapeHtml(EXIT_BASIS[v.exit_basis] || "")}"><i></i>${escapeHtml(shortRoadName(roads[v.to].name))}${v.exit_basis === "direction" ? " ~" : ""}</span>` : `<span class="muted">${road ? "not seen" : ""}</span>`}</td>
+        <td>${escapeHtml(turnText(v.turn))}</td>
         <td>${fmtTime(v.t)}</td>
+        <td>${road && v.wait !== null && v.wait !== undefined ? `${fmtSec(v.wait)}${v.wait_partial ? "+" : ""}` : ""}</td>
         <td>${(v.confidence * 100).toFixed(0)}%</td>
       </tr>`;
     })
     .join("");
   return `<div class="table-scroll"><table>
-    <thead><tr><th>ID</th><th>Type</th><th>Category</th><th>Came from</th><th>Arrived</th><th>Avg conf.</th></tr></thead>
+    <thead><tr><th>ID</th><th>Type</th><th>Category</th><th>Came from</th><th>Left by</th><th>Turn</th><th>Arrived</th><th title="Time stopped on the road it came from. + = already waiting when the clip started, or still waiting at the end">Waited</th><th>Avg conf.</th></tr></thead>
     <tbody>${rows}</tbody>
   </table></div>`;
 }

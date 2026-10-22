@@ -56,6 +56,32 @@ Then open **http://127.0.0.1:8000** in your browser.
 Use **Edit roads** on a finished video to change the outlines and recount in seconds,
 without re-running detection.
 
+### Junction summary, turning movements, queues
+
+Each finished video also gets traffic-engineering numbers (`backend/traffic.py`):
+
+- **Turning movements** — a from → to table with every movement labelled left /
+  straight / right / U-turn (from the driver's point of view). The road a vehicle
+  *left by* is the last other road it was seen on; if the tracker lost it, the id that
+  picked it up is followed; if it vanished mid-junction (behind a building, a bus…),
+  the road it was heading for is used and marked as an estimate. Vehicles still in
+  view at the end, or lost while still on their approach road, are "exit not seen".
+- **Waiting time** — how long each vehicle stood still on the road it came from
+  (slower than 0.2 of its own width per second). A `+` means the wait was cut off by
+  the start or end of the clip, so the real wait was longer.
+- **Queue** — vehicles stopped on each road over time (graph + max/average).
+- **Flow and PCU** — vehicles/hour and passenger car units per IRC:106-1990 (urban
+  roads), interpolated by each vehicle type's share of traffic. Hourly rates are scaled
+  from the clip length, so they're rough for short clips.
+
+### Exports
+
+From a finished video's page:
+- **Excel** — Summary, Turning movements, Vehicles, Queue over time and Method sheets.
+- **Roads CSV** / **Vehicles CSV** — one row per road / per vehicle.
+- **Report / PDF** — a printable report (choose *Save as PDF* as the printer); videos
+  and controls are left out and only counted vehicles are listed.
+
 ### How a vehicle is assigned to a road
 
 A vehicle counts for the road whose outline its ground point (bottom-centre of its box)
@@ -125,6 +151,8 @@ backend/
   main.py        FastAPI app: upload, list, detail, roads, video streaming + worker thread
   processor.py   pass 1: YOLO + ByteTrack, save tracks · pass 2: per-road videos + stats
   roads.py       suggest road outlines from vehicle paths, assign vehicles to roads
+  traffic.py     turning movements, queues, waiting time, flow, PCU
+  export.py      Excel workbook and CSV downloads
   config.py      paths, model settings, vehicle-class mapping
   jobs.py        file-backed job store (storage/jobs.json)
 frontend/
